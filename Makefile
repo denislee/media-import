@@ -31,11 +31,18 @@ GO       ?= go
 SOURCES  := $(shell find . -name '*.go' -not -path './$(BUILDDIR)/*') go.mod go.sum
 
 .DEFAULT_GOAL := build
-.PHONY: build run dev test test-v cover vet fmt fmt-check check install uninstall clean deps help
+FORCE:
+.PHONY: FORCE build run dev test test-v cover vet fmt fmt-check check install uninstall clean deps help
 
 build: $(BIN) ## Build the binary (incremental)
 
-$(BIN): $(SOURCES)
+# Rebuild when the git version changes (e.g. after a commit), not only on source edits.
+VERSION_STAMP := $(BUILDDIR)/.version
+$(VERSION_STAMP): FORCE
+	@mkdir -p $(BUILDDIR)
+	@echo '$(VERSION) $(TAGS)' | cmp -s - $@ || echo '$(VERSION) $(TAGS)' > $@
+
+$(BIN): $(SOURCES) $(VERSION_STAMP)
 	@mkdir -p $(BUILDDIR)
 	$(GO) build $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' -o $@ $(PKG)
 	@echo "built $@ ($(VERSION))"
@@ -77,7 +84,7 @@ install: $(BIN) ## Install the last compiled binary (rebuilds only if sources ch
 	install -m644 assets/$(APP).svg $(ICONDIR)/$(APP).svg
 	-@command -v update-desktop-database >/dev/null && update-desktop-database -q $(APPDIR) || true
 	-@command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t $(DESTDIR)$(PREFIX)/share/icons/hicolor 2>/dev/null || true
-	@echo "installed $(VERSION) to $(BINDIR)/$(APP)"
+	@echo "installed $$($(BINDIR)/$(APP) -version) to $(BINDIR)/$(APP)"
 
 uninstall: ## Remove installed files
 	rm -f $(BINDIR)/$(APP) $(APPDIR)/$(APP).desktop $(ICONDIR)/$(APP).svg
