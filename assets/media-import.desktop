@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Media Import
+GenericName=Photo & Video Importer
+Comment=Import photos, videos and audio from cameras, cards and phones into dated folders
+Exec=@BINDIR@/media-import
+Icon=media-import
+Terminal=false
+Categories=Graphics;Photography;AudioVideo;Utility;
+Keywords=photo;video;camera;import;sd;card;exif;
+StartupWMClass=media-import
