@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/denislee/media-import/internal/importer"
 )
 
 // settings are remembered between runs in $XDG_CONFIG_HOME/media-import.
@@ -69,4 +72,64 @@ func saveSettings(s settings) error {
 		return err
 	}
 	return os.WriteFile(p, b, 0o644)
+}
+
+// resumeMeta describes an import that can be resumed. It is written when an
+// import starts and removed when it completes; the matching journal records
+// per-file progress.
+type resumeMeta struct {
+	Settings     settings  `json:"settings"`
+	Source       string    `json:"source"`      // absolute source directory
+	OldSources   []string  `json:"old_sources"` // earlier mount paths of the same source
+	Dest         string    `json:"dest"`
+	DirTemplate  string    `json:"dir_template"`
+	NameTemplate string    `json:"name_template"`
+	Started      time.Time `json:"started"`
+}
+
+func stateDir() string {
+	if d := os.Getenv("XDG_STATE_HOME"); d != "" {
+		return filepath.Join(d, "media-import")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "state", "media-import")
+}
+
+func journalPath() string { return filepath.Join(stateDir(), "journal") }
+func resumePath() string  { return filepath.Join(stateDir(), "resume.json") }
+
+func saveResumeMeta(m resumeMeta) error {
+	if err := os.MkdirAll(stateDir(), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(resumePath(), b, 0o644)
+}
+
+// loadResume returns the interrupted import, if any.
+func loadResume() (*resumeMeta, *importer.ResumeState) {
+	b, err := os.ReadFile(resumePath())
+	if err != nil {
+		return nil, nil
+	}
+	var m resumeMeta
+	if json.Unmarshal(b, &m) != nil {
+		return nil, nil
+	}
+	rs, err := importer.ReadJournal(journalPath())
+	if err != nil {
+		return nil, nil
+	}
+	return &m, rs
+}
+
+func clearResume() {
+	os.Remove(resumePath())
+	os.Remove(journalPath())
 }

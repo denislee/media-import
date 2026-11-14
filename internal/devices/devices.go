@@ -16,6 +16,7 @@ type Volume struct {
 	Label string
 	Path  string
 	FS    string
+	Dev   string // mount source, e.g. /dev/sdc1
 }
 
 // List returns mounted removable volumes, MTP/gvfs mounts and anything under
@@ -81,7 +82,11 @@ func parseMountinfo(line string) (Volume, bool) {
 		return Volume{}, false
 	}
 	mp := unescape(fields[4])
-	return Volume{Label: filepath.Base(mp), Path: mp, FS: fields[sep+1]}, true
+	v := Volume{Label: filepath.Base(mp), Path: mp, FS: fields[sep+1]}
+	if sep+2 < len(fields) {
+		v.Dev = unescape(fields[sep+2])
+	}
+	return v, true
 }
 
 // unescape decodes the octal escapes (\040 for space etc.) used by the kernel.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,8 +93,15 @@ func TestImportDryRun(t *testing.T) {
 	src, dst := setup(t)
 	o := baseOpts(src, dst)
 	o.DryRun = true
-	var lines []string
-	sum, err := Run(context.Background(), o, nil, func(s string) { lines = append(lines, s) })
+	var (
+		mu    sync.Mutex
+		lines []string
+	)
+	sum, err := Run(context.Background(), o, nil, func(s string) {
+		mu.Lock()
+		lines = append(lines, s)
+		mu.Unlock()
+	})
 	if err != nil || sum.Copied != 3 {
 		t.Fatalf("%v %+v", err, sum.Progress)
 	}
@@ -166,5 +174,39 @@ func TestCancel(t *testing.T) {
 	cancel()
 	if _, err := Run(ctx, baseOpts(src, dst), nil, nil); err == nil {
 		t.Error("expected context error")
+	}
+}
+
+func TestProgressDetails(t *testing.T) {
+	src, dst := setup(t)
+	var (
+		mu   sync.Mutex
+		last Progress
+	)
+	sum, err := Run(context.Background(), baseOpts(src, dst), func(p Progress) {
+		mu.Lock()
+		last = p
+		mu.Unlock()
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range sum.ByKind {
+		n += c
+	}
+	if n != sum.Copied || n == 0 {
+		t.Fatalf("ByKind %v does not add up to %d copied", sum.ByKind, sum.Copied)
+	}
+	if len(sum.Active) != 0 || sum.Workers == 0 {
+		t.Fatalf("active %v workers %d", sum.Active, sum.Workers)
+	}
+	if sum.Bytes != sum.TotalBytes {
+		t.Fatalf("bytes %d of %d", sum.Bytes, sum.TotalBytes)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if last.Phase != "done" {
+		t.Fatalf("last phase %q", last.Phase)
 	}
 }
