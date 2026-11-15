@@ -87,6 +87,9 @@ func TestImportCopy(t *testing.T) {
 	if sum.Copied != 0 || sum.Skipped != 3 {
 		t.Fatalf("rerun summary %+v", sum.Progress)
 	}
+	if sum.Bytes != sum.TotalBytes {
+		t.Fatalf("duplicate-only run counted %d of %d bytes", sum.Bytes, sum.TotalBytes)
+	}
 }
 
 func TestImportDryRun(t *testing.T) {

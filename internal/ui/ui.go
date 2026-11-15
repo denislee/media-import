@@ -594,15 +594,12 @@ func (s *state) layout(gtx layout.Context) layout.Dimensions {
 	s.mu.Unlock()
 
 	th := s.th
-	cfgGtx := gtx
-	if running {
-		cfgGtx = gtx.Disabled()
-	}
-
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			if running {
-				gtx = cfgGtx
+				// Disable this gtx (not the outer one): it carries the
+				// constraints Flex gave this child.
+				gtx = gtx.Disabled()
 			}
 			sections := []layout.Widget{
 				s.header,
@@ -882,6 +879,9 @@ func (s *state) runPanel(gtx layout.Context, running bool) layout.Dimensions {
 				verb = "Dry run"
 			}
 			line = fmt.Sprintf("%s… %d%%", verb, percent(p))
+			if act := activitySummary(p.Active); act != "" {
+				line += "  ·  " + act
+			}
 			if p.Paused {
 				line = fmt.Sprintf("Paused at %d%%", percent(p))
 			}
@@ -967,6 +967,24 @@ func (s *state) runPanel(gtx layout.Context, running bool) layout.Dimensions {
 }
 
 // percent is the overall byte-based completion, 0–100.
+// activitySummary says what the workers are doing, e.g.
+// "copying 2 · checking if already imported 2".
+func activitySummary(active []importer.FileProgress) string {
+	var order []string
+	n := map[string]int{}
+	for _, fp := range active {
+		if n[fp.Stage] == 0 {
+			order = append(order, fp.Stage)
+		}
+		n[fp.Stage]++
+	}
+	parts := make([]string, len(order))
+	for i, st := range order {
+		parts[i] = fmt.Sprintf("%s %d", st, n[st])
+	}
+	return strings.Join(parts, " · ")
+}
+
 // isDryRunning reports whether the current run is a dry run (nothing to pause).
 func (s *state) isDryRunning() bool {
 	s.mu.Lock()
@@ -1044,7 +1062,7 @@ func (s *state) progressDetails(gtx layout.Context, p importer.Progress, running
 	chips := []chip{
 		{"Files", fmt.Sprintf("%d / %d", p.Done, p.Total), s.th.Fg},
 		{"Imported", strconv.Itoa(p.Copied), colOK},
-		{"Skipped", strconv.Itoa(p.Skipped), colWarn},
+		{"Already imported", strconv.Itoa(p.Skipped), colWarn},
 		{"Failed", strconv.Itoa(p.Failed), colErr},
 	}
 	if p.Verified > 0 {
@@ -1139,7 +1157,7 @@ func (s *state) activeRow(gtx layout.Context, fp importer.FileProgress, dest str
 		}),
 		layout.Rigid(spacer(10, 0)),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			w := gtx.Dp(104)
+			w := gtx.Dp(160)
 			gtx.Constraints.Min.X, gtx.Constraints.Max.X = w, w
 			l := material.Caption(s.th, fp.Stage)
 			l.Color = withAlpha(s.th.Fg, 0xa0)

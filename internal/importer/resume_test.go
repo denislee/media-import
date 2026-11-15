@@ -104,3 +104,28 @@ func TestRebase(t *testing.T) {
 		t.Fatalf("%+v", rs)
 	}
 }
+
+func TestSameContent(t *testing.T) {
+	d := t.TempDir()
+	big := make([]byte, 3<<20+5)
+	for i := range big {
+		big[i] = byte(i)
+	}
+	a, b, c, e := filepath.Join(d, "a"), filepath.Join(d, "b"), filepath.Join(d, "c"), filepath.Join(d, "e")
+	os.WriteFile(a, big, 0o644)
+	os.WriteFile(b, big, 0o644)
+	big[len(big)-1]++
+	os.WriteFile(c, big, 0o644)
+	os.WriteFile(e, big[:10], 0o644)
+	nop := func() error { return nil }
+	var seen int64
+	if ok, err := sameContent(a, b, nop, func(n int64) { seen += n }); !ok || err != nil || seen != int64(len(big)) {
+		t.Fatalf("identical: %v %v seen=%d", ok, err, seen)
+	}
+	if ok, _ := sameContent(a, c, nop, func(int64) {}); ok {
+		t.Fatal("last byte differs but reported same")
+	}
+	if ok, _ := sameContent(a, e, nop, func(int64) {}); ok {
+		t.Fatal("different length reported same")
+	}
+}

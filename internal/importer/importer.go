@@ -74,7 +74,7 @@ type FileProgress struct {
 	Path  string
 	Dest  string
 	Kind  string
-	Stage string // "reading date", "checking", "copying", "moving", "verifying", "removing source"…
+	Stage string // "reading date", "preparing", "checking if already imported", "copying", "moving", "verifying", "removing source"…
 	Size  int64
 	Bytes int64
 }
@@ -391,7 +391,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 			r.bytes.Add(j.info.Size())
 			return
 		}
-		if dst, ok := rs.Pending[j.src]; ok && r.recoverPending(j, dst) {
+		if dst, ok := rs.Pending[j.src]; ok && r.recoverPending(j, dst, sl) {
 			return
 		}
 	}
@@ -408,16 +408,18 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	dir := filepath.Join(r.opt.Dest, organize.Dir(r.opt.DirTemplate, f))
 	name := organize.FileName(r.opt.NameTemplate, f, strings.ToLower(ext))
 
-	sl.set("checking", "")
-	dst, dup, err := r.reserve(dir, name, j)
+	sl.set("preparing", "")
+	dst, dup, err := r.reserve(ctx, dir, name, j, sl)
 	if err != nil {
-		r.bytes.Add(j.info.Size()) // count it as processed so the bar can reach 100%
-		r.fail("%s: %v", j.src, err)
+		if ctx.Err() == nil {
+			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load())) // count it as processed so the bar can reach 100%
+			r.fail("%s: %v", j.src, err)
+		}
 		return
 	}
 	if dup {
 		r.skipped.Add(1)
-		r.bytes.Add(j.info.Size())
+		r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
 		r.jnl.done(j.src, dst)
 		r.logf(fmt.Sprintf("SKIP %s (already at %s)", j.src, dst))
 		return
@@ -455,7 +457,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 
 // reserve picks a free destination path. If an identical file already exists
 // and SkipDups is set it returns dup=true.
-func (r *runner) reserve(dir, name string, j job) (string, bool, error) {
+func (r *runner) reserve(ctx context.Context, dir, name string, j job, sl *slot) (string, bool, error) {
 	if !r.opt.DryRun {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", false, err
@@ -484,13 +486,14 @@ func (r *runner) reserve(dir, name string, j job) (string, bool, error) {
 			return "", false, err
 		}
 		if r.opt.SkipDups && st.Size() == j.info.Size() {
-			same, err := sameContent(j.src, cand)
+			same, err := r.compare(ctx, j, cand, sl)
 			if err != nil {
 				return "", false, err
 			}
 			if same {
 				return cand, true, nil
 			}
+			sl.set("preparing", "")
 		}
 	}
 	return "", false, errors.New("too many name collisions")
@@ -564,7 +567,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 // recoverPending handles a file whose transfer an interrupted run had started.
 // It removes a leftover temp file and, if the destination was completed,
 // records it as done. It reports whether the file needs no further work.
-func (r *runner) recoverPending(j job, dst string) bool {
+func (r *runner) recoverPending(j job, dst string, sl *slot) bool {
 	part := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
 	if err := os.Remove(part); err == nil {
 		r.logf("RESUME removed incomplete " + part)
@@ -573,7 +576,7 @@ func (r *runner) recoverPending(j job, dst string) bool {
 	if err != nil || st.Size() != j.info.Size() {
 		return false
 	}
-	same, err := sameContent(j.src, dst)
+	same, err := r.compare(context.Background(), j, dst, sl)
 	if err != nil || !same {
 		r.logf(fmt.Sprintf("WARN %s exists but differs from %s; importing again under a new name", dst, j.src))
 		return false
@@ -585,7 +588,7 @@ func (r *runner) recoverPending(j job, dst string) bool {
 	}
 	r.jnl.done(j.src, dst)
 	r.resumed.Add(1)
-	r.bytes.Add(j.info.Size())
+	r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
 	r.logf(fmt.Sprintf("RESUME %s already complete at %s", j.src, dst))
 	return true
 }
@@ -694,16 +697,61 @@ func fileHash(p string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-func sameContent(a, b string) (bool, error) {
-	ha, err := fileHash(a)
+// compare checks whether src and an existing destination file are identical,
+// reporting progress on the worker's slot and in the overall total. If they
+// differ, the bytes counted so far are taken back out of the total, since the
+// file will be copied (and counted) again.
+func (r *runner) compare(ctx context.Context, j job, existing string, sl *slot) (bool, error) {
+	sl.set("checking if already imported", existing)
+	sl.bytes.Store(0)
+	same, err := sameContent(j.src, existing, func() error { return r.gate.wait(ctx) }, func(n int64) {
+		sl.bytes.Add(n)
+		sl.counted.Add(n)
+		r.bytes.Add(n)
+	})
+	if err != nil || !same {
+		r.bytes.Add(-sl.counted.Swap(0))
+		sl.bytes.Store(0)
+	}
+	return same, err
+}
+
+// sameContent compares two files chunk by chunk, stopping at the first
+// difference. onBytes is called with the number of bytes compared.
+func sameContent(a, b string, wait func() error, onBytes func(int64)) (bool, error) {
+	fa, err := os.Open(a)
 	if err != nil {
 		return false, err
 	}
-	hb, err := fileHash(b)
+	defer fa.Close()
+	fb, err := os.Open(b)
 	if err != nil {
 		return false, err
 	}
-	return bytes.Equal(ha, hb), nil
+	defer fb.Close()
+	const chunk = 1 << 20
+	ba, bb := make([]byte, chunk), make([]byte, chunk)
+	for {
+		if err := wait(); err != nil {
+			return false, err
+		}
+		na, ea := io.ReadFull(fa, ba)
+		nb, eb := io.ReadFull(fb, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false, nil
+		}
+		onBytes(int64(na))
+		endA := ea == io.EOF || ea == io.ErrUnexpectedEOF
+		endB := eb == io.EOF || eb == io.ErrUnexpectedEOF
+		switch {
+		case ea != nil && !endA:
+			return false, ea
+		case eb != nil && !endB:
+			return false, eb
+		case endA || endB:
+			return endA && endB, nil
+		}
+	}
 }
 
 func accessTime(fi fs.FileInfo) time.Time {
