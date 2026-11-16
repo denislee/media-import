@@ -57,7 +57,8 @@ type state struct {
 	srcBrowse, dstBrowse                    widget.Clickable
 	startBtn, cancelBtn, clearLogBtn        widget.Clickable
 	pauseBtn, resumeBtn, discardBtn         widget.Clickable
-	dirEnum, nameEnum                       widget.Enum
+	dirEnum, nameEnum, dupEnum              widget.Enum
+	dupAnyName                              widget.Bool
 	kinds                                   map[media.Kind]*widget.Bool
 	move, skipDups, verify, ffprobe         widget.Bool
 	mtimeCap, dryRun, hidden                widget.Bool
@@ -147,6 +148,10 @@ func newState(w *app.Window) *state {
 		s.kinds[k] = &widget.Bool{Value: cfg.Kinds[k.String()]}
 	}
 	s.move.Value, s.skipDups.Value, s.verify.Value = cfg.Move, cfg.SkipDups, cfg.Verify
+	s.dupEnum.Value, s.dupAnyName.Value = cfg.DupCheck, cfg.DupAnyName
+	if s.dupEnum.Value != importer.DupCheckFull {
+		s.dupEnum.Value = importer.DupCheckFast
+	}
 	s.ffprobe.Value, s.mtimeCap.Value = cfg.FFprobe && media.FFprobeAvailable(), cfg.MtimeCapture
 	s.dryRun.Value, s.hidden.Value = cfg.DryRun, cfg.Hidden
 	s.status = "Ready. Version " + Version
@@ -299,6 +304,7 @@ func (s *state) settings() settings {
 		DirPreset: s.dirEnum.Value, CustomDir: s.customDirEd.Text(),
 		NamePreset: s.nameEnum.Value, CustomName: s.customNameEd.Text(),
 		Kinds: k, Move: s.move.Value, SkipDups: s.skipDups.Value, Verify: s.verify.Value,
+		DupCheck: s.dupEnum.Value, DupAnyName: s.dupAnyName.Value,
 		FFprobe: s.ffprobe.Value, MtimeCapture: s.mtimeCap.Value, DryRun: s.dryRun.Value, Hidden: s.hidden.Value,
 	}
 }
@@ -386,6 +392,8 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 		Move:          cfg.Move,
 		DryRun:        cfg.DryRun,
 		SkipDups:      cfg.SkipDups,
+		DupCheck:      cfg.DupCheck,
+		DupAnyName:    cfg.DupAnyName,
 		Verify:        cfg.Verify,
 		UseFFprobe:    cfg.FFprobe,
 		MtimeCapture:  cfg.MtimeCapture,
@@ -464,6 +472,9 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 			msg = fmt.Sprintf("Cancelled after %d of %d files", sum.Done, sum.Total)
 		case err != nil:
 			msg = "Error: " + err.Error()
+		}
+		if line := dupSummary(sum.Progress); line != "" {
+			s.addLog(line)
 		}
 		if sum.Verified > 0 {
 			s.addLog(fmt.Sprintf("Integrity: %d copies re-read from disk and matched their source checksum", sum.Verified))
@@ -853,13 +864,58 @@ func (s *state) optionsSection(gtx layout.Context) layout.Dimensions {
 		{&s.hidden, "Include hidden files and folders", gtx},
 		{&s.dryRun, "Dry run (show what would happen, change nothing)", gtx},
 	}
-	ch := make([]layout.FlexChild, len(opts))
+	ch := make([]layout.FlexChild, 0, len(opts)+2)
 	for i, o := range opts {
-		ch[i] = layout.Rigid(func(layout.Context) layout.Dimensions {
+		ch = append(ch, layout.Rigid(func(layout.Context) layout.Dimensions {
 			return material.CheckBox(s.th, o.b, o.label).Layout(o.gtx)
-		})
+		}))
+		if i == 0 {
+			ch = append(ch, layout.Rigid(s.dupOptions))
+		}
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
+}
+
+// dupOptions is the duplicate-check method choice under "Skip files already
+// in destination"; it is disabled while that option is off.
+func (s *state) dupOptions(gtx layout.Context) layout.Dimensions {
+	if !s.skipDups.Value {
+		gtx = gtx.Disabled()
+	}
+	return layout.Inset{Left: 32}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(s.muted("Check:")),
+					layout.Rigid(spacer(8, 0)),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Right: 12}.Layout(gtx, material.RadioButton(s.th, &s.dupEnum, importer.DupCheckFast, "Quick (size, date, sampled blocks)").Layout)
+					}),
+					layout.Rigid(material.RadioButton(s.th, &s.dupEnum, importer.DupCheckFull, "Full (compare every byte, slower)").Layout),
+				)
+			}),
+			layout.Rigid(material.CheckBox(s.th, &s.dupAnyName, "Also detect duplicates under other names (reads same-size files in full)").Layout),
+		)
+	})
+}
+
+// dupSummary describes how the duplicates of a finished run were recognised.
+func dupSummary(p importer.Progress) string {
+	var parts []string
+	add := func(n int, what string) {
+		if n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, what))
+		}
+	}
+	add(p.DupIndexed, "from the destination index")
+	add(p.DupQuick, "by quick check")
+	add(p.DupFull, "by full compare")
+	add(p.DupOtherName, "under another name")
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Duplicates: %s; %s read in %s", strings.Join(parts, ", "),
+		humanBytes(p.DupCheckBytes), p.DupCheckTime.Round(10*time.Millisecond))
 }
 
 func (s *state) runPanel(gtx layout.Context, running bool) layout.Dimensions {

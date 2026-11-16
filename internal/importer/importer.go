@@ -5,11 +5,8 @@ package importer
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"hash"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,8 +17,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/denislee/media-import/internal/media"
 	"github.com/denislee/media-import/internal/organize"
@@ -34,12 +29,15 @@ type Options struct {
 	DirTemplate   string
 	NameTemplate  string
 	Kinds         map[media.Kind]bool
-	Move          bool // delete source after a successful copy
-	DryRun        bool // only report what would happen
-	SkipDups      bool // skip files already present (same size + content)
-	Verify        bool // re-read the copy and compare checksums
-	UseFFprobe    bool // use ffprobe for formats without built-in parsers
-	MtimeCapture  bool // set file mtime to the capture time instead of the source mtime
+	Move          bool   // delete source after a successful copy
+	DryRun        bool   // only report what would happen
+	SkipDups      bool   // skip files already present (same size + content)
+	DupCheck      string // DupCheckFast (default) or DupCheckFull
+	DupAnyName    bool   // also detect copies stored under another name (hashes the source; needs the index)
+	NoIndex       bool   // neither read nor write the destination index
+	Verify        bool   // re-read the copy and compare checksums
+	UseFFprobe    bool   // use ffprobe for formats without built-in parsers
+	MtimeCapture  bool   // set file mtime to the capture time instead of the source mtime
 	IncludeHidden bool
 	Workers       int
 
@@ -67,6 +65,14 @@ type Progress struct {
 	Verified   int            // copies whose checksum was re-read from disk and matched
 	Active     []FileProgress // files being processed right now, one per busy worker
 	ByKind     map[string]int // files imported per media kind (kind name → count)
+
+	// Duplicate-check statistics.
+	DupCheckBytes int64         // bytes read (source + destination) to decide duplicates
+	DupQuick      int           // duplicates decided by size, mtime and sampled blocks
+	DupFull       int           // duplicates decided by comparing every byte
+	DupIndexed    int           // duplicates found through the destination index
+	DupOtherName  int           // duplicates found under another name by checksum
+	DupCheckTime  time.Duration // time spent checking, summed over workers
 }
 
 // FileProgress describes one file a worker is processing.
@@ -139,8 +145,13 @@ type runner struct {
 	jnl                                  *journal
 	byKind                               [media.Audio + 1]atomic.Int64
 
+	dupBytes, dupNanos                     atomic.Int64
+	dupQuick, dupFull, dupIndexed, dupOthr atomic.Int64
+	idx                                    *index
+	dirs                                   sync.Map // directories known to exist
+
 	mu       sync.Mutex
-	reserved map[string]bool
+	reserved map[string]resv
 	errs     []string
 }
 
@@ -153,7 +164,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	if err := validate(&opt); err != nil {
 		return Summary{}, err
 	}
-	r := &runner{opt: opt, logf: logf, reserved: map[string]bool{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
+	r := &runner{opt: opt, logf: logf, reserved: map[string]resv{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
 	if r.gate == nil {
 		r.gate = &Gate{}
 	}
@@ -164,6 +175,14 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 		}
 		r.jnl = j
 		defer r.jnl.close()
+	}
+	if !opt.NoIndex {
+		ix, err := openIndex(opt.Dest, opt.DryRun)
+		if err != nil {
+			logf("WARN cannot write destination index: " + err.Error())
+		}
+		r.idx = ix
+		defer r.idx.close()
 	}
 	r.phase.Store("scanning")
 	r.current.Store("")
@@ -243,6 +262,13 @@ func validate(opt *Options) error {
 	if !anyKind {
 		return errors.New("no media types selected")
 	}
+	switch opt.DupCheck {
+	case "":
+		opt.DupCheck = DupCheckFast
+	case DupCheckFast, DupCheckFull:
+	default:
+		return fmt.Errorf("unknown duplicate check mode %q", opt.DupCheck)
+	}
 	if opt.Workers <= 0 {
 		opt.Workers = min(4, runtime.NumCPU())
 	}
@@ -268,6 +294,13 @@ func (r *runner) snapshot(start time.Time) Progress {
 		Verified:   int(r.verified.Load()),
 		Active:     r.active(),
 		ByKind:     r.kindCounts(),
+
+		DupCheckBytes: r.dupBytes.Load(),
+		DupQuick:      int(r.dupQuick.Load()),
+		DupFull:       int(r.dupFull.Load()),
+		DupIndexed:    int(r.dupIndexed.Load()),
+		DupOtherName:  int(r.dupOthr.Load()),
+		DupCheckTime:  time.Duration(r.dupNanos.Load()),
 	}
 }
 
@@ -322,7 +355,7 @@ func (r *runner) scan(ctx context.Context) ([]job, error) {
 			}
 			name := d.Name()
 			if d.IsDir() {
-				if p == r.opt.Dest || (p != src && !r.opt.IncludeHidden && strings.HasPrefix(name, ".")) {
+				if p == r.opt.Dest || name == IndexDir || (p != src && !r.opt.IncludeHidden && strings.HasPrefix(name, ".")) {
 					return fs.SkipDir
 				}
 				return nil
@@ -378,6 +411,9 @@ loop:
 	return ctx.Err()
 }
 
+// captureTime is media.CaptureTime; tests replace it to count calls.
+var captureTime = media.CaptureTime
+
 func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if ctx.Err() != nil {
 		return
@@ -395,7 +431,13 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 			return
 		}
 	}
-	t, how := media.CaptureTime(j.src, j.kind, j.info, media.DateOptions{UseFFprobe: r.opt.UseFFprobe})
+	if r.opt.SkipDups {
+		if dst, how := r.indexHit(ctx, j, sl); how != notDup {
+			r.skipDup(j, sl, dst, how, nil)
+			return
+		}
+	}
+	t, how := captureTime(j.src, j.kind, j.info, media.DateOptions{UseFFprobe: r.opt.UseFFprobe})
 
 	ext := filepath.Ext(j.src)
 	f := organize.Fields{
@@ -409,7 +451,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	name := organize.FileName(r.opt.NameTemplate, f, strings.ToLower(ext))
 
 	sl.set("preparing", "")
-	dst, dup, err := r.reserve(ctx, dir, name, j, sl)
+	dst, dup, err := r.reserve(ctx, dir, name, j, [2]time.Time{j.info.ModTime(), t}, sl)
 	if err != nil {
 		if ctx.Err() == nil {
 			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load())) // count it as processed so the bar can reach 100%
@@ -417,14 +459,27 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		}
 		return
 	}
-	if dup {
-		r.skipped.Add(1)
-		r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
-		r.jnl.done(j.src, dst)
-		r.logf(fmt.Sprintf("SKIP %s (already at %s)", j.src, dst))
+	if dup != notDup {
+		r.skipDup(j, sl, dst, dup, nil)
 		return
 	}
-	defer r.release(dst)
+	written := false
+	defer func() { r.release(dst, written) }()
+
+	if r.opt.SkipDups && r.opt.DupAnyName {
+		other, sum, err := r.otherNameHit(ctx, j, sl)
+		if err != nil {
+			if ctx.Err() == nil {
+				r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
+				r.fail("%s: %v", j.src, err)
+			}
+			return
+		}
+		if other != "" {
+			r.skipDup(j, sl, other, dupOther, sum)
+			return
+		}
+	}
 
 	verb := "COPY"
 	if r.opt.Move {
@@ -442,70 +497,124 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if r.opt.MtimeCapture {
 		mtime = t
 	}
-	if err := r.transfer(ctx, j, dst, mtime, sl); err != nil {
+	err = r.ensureDir(filepath.Dir(dst))
+	var sum []byte
+	if err == nil {
+		sum, err = r.transfer(ctx, j, dst, mtime, sl)
+	}
+	if err != nil {
 		if ctx.Err() == nil {
 			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
 			r.fail("%s: %v", j.src, err)
 		}
 		return
 	}
+	written = true
 	r.jnl.done(j.src, dst)
 	r.copied.Add(1)
 	r.byKind[j.kind].Add(1)
+	r.record(j, dst, sum)
 	r.logf(fmt.Sprintf("%s %s -> %s [%s]", verb, j.src, dst, how))
 }
 
-// reserve picks a free destination path. If an identical file already exists
-// and SkipDups is set it returns dup=true.
-func (r *runner) reserve(ctx context.Context, dir, name string, j job, sl *slot) (string, bool, error) {
-	if !r.opt.DryRun {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return "", false, err
-		}
+func srcKey(j job) idxKey {
+	return idxKey{filepath.Base(j.src), j.info.Size(), j.info.ModTime().UnixNano()}
+}
+
+// record adds a destination index entry for j stored at dst.
+func (r *runner) record(j job, dst string, sum []byte) {
+	if r.idx == nil || r.opt.DryRun {
+		return
 	}
-	ext := filepath.Ext(name)
-	base := strings.TrimSuffix(name, ext)
-	for i := 0; i < 10000; i++ {
-		cand := filepath.Join(dir, name)
-		if i > 0 {
-			cand = filepath.Join(dir, fmt.Sprintf("%s_%d%s", base, i, ext))
+	st, err := os.Stat(dst)
+	if err != nil {
+		return
+	}
+	if err := r.idx.add(srcKey(j), dst, st.ModTime(), sum); err != nil {
+		r.logf("WARN cannot update destination index: " + err.Error())
+	}
+}
+
+// skipDup finishes a source that is already in the destination at dst. It is
+// left on the source, even when moving.
+func (r *runner) skipDup(j job, sl *slot, dst string, how dupHow, sum []byte) {
+	r.skipped.Add(1)
+	r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
+	r.jnl.done(j.src, dst)
+	switch how {
+	case dupQuick:
+		r.dupQuick.Add(1) // not recorded: the content was only sampled
+	case dupFull, dupOther:
+		if how == dupFull {
+			r.dupFull.Add(1)
+		} else {
+			r.dupOthr.Add(1)
 		}
-		r.mu.Lock()
-		if r.reserved[cand] {
-			r.mu.Unlock()
+		r.record(j, dst, sum)
+	case dupIndexed:
+		r.dupIndexed.Add(1)
+	}
+	r.logf(fmt.Sprintf("SKIP %s (already at %s, %s)", j.src, dst, how.note()))
+}
+
+// indexHit looks the source up in the destination index, before its date is
+// parsed. A hit counts only if the recorded destination still has the
+// recorded size and mtime; in full mode its content is compared as well.
+func (r *runner) indexHit(ctx context.Context, j job, sl *slot) (string, dupHow) {
+	if r.idx == nil {
+		return "", notDup
+	}
+	defer r.timeDup(time.Now())
+	for _, e := range r.idx.lookup(srcKey(j)) {
+		dst := filepath.Join(r.opt.Dest, e.rel)
+		st, err := os.Stat(dst)
+		if err != nil || !st.Mode().IsRegular() || st.Size() != e.key.size || st.ModTime().UnixNano() != e.dmtime {
 			continue
 		}
-		st, err := os.Stat(cand)
-		if errors.Is(err, fs.ErrNotExist) {
-			r.reserved[cand] = true
-			r.mu.Unlock()
-			return cand, false, nil
+		if r.opt.DupCheck != DupCheckFull {
+			return dst, dupIndexed
 		}
-		r.mu.Unlock()
-		if err != nil {
-			return "", false, err
-		}
-		if r.opt.SkipDups && st.Size() == j.info.Size() {
-			same, err := r.compare(ctx, j, cand, sl)
-			if err != nil {
-				return "", false, err
-			}
-			if same {
-				return cand, true, nil
-			}
-			sl.set("preparing", "")
+		if same, err := r.compare(ctx, j, dst, sl); err == nil && same {
+			return dst, dupFull
 		}
 	}
-	return "", false, errors.New("too many name collisions")
+	return "", notDup
 }
 
-func (r *runner) release(p string) {
-	r.mu.Lock()
-	delete(r.reserved, p)
-	r.mu.Unlock()
+// otherNameHit hashes the source and looks for an indexed destination file
+// with the same size and checksum, wherever it is stored. It only reads the
+// source when the index knows a file of the same size.
+func (r *runner) otherNameHit(ctx context.Context, j job, sl *slot) (string, []byte, error) {
+	cands := r.idx.withSize(j.info.Size())
+	if len(cands) == 0 {
+		return "", nil, nil
+	}
+	defer r.timeDup(time.Now())
+	sl.set(stageOtherNm, "")
+	sl.bytes.Store(0)
+	sum, err := hashFile(j.src, func() error { return r.gate.wait(ctx) }, func(n int64) {
+		r.dupBytes.Add(n)
+		sl.bytes.Add(n)
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	for _, e := range cands {
+		if !bytes.Equal(e.sha, sum) {
+			continue
+		}
+		dst := filepath.Join(r.opt.Dest, e.rel)
+		if st, err := os.Stat(dst); err == nil && st.Size() == e.key.size && st.ModTime().UnixNano() == e.dmtime {
+			return dst, sum, nil
+		}
+	}
+	sl.set("preparing", "")
+	return "", nil, nil
 }
 
-func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Time, sl *slot) error {
+// transfer copies or moves j to dst and returns the SHA-256 of the data
+// written (nil when the file was renamed in place).
+func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Time, sl *slot) ([]byte, error) {
 	atime := accessTime(j.info)
 	size := j.info.Size()
 	r.jnl.begin(j.src, dst)
@@ -515,10 +624,11 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 			r.bytes.Add(size)
 			sl.counted.Store(size)
 			sl.bytes.Store(size)
-			return os.Chtimes(dst, atime, mtime)
+			return nil, os.Chtimes(dst, atime, mtime)
 		}
 	}
 	wait := func() error { return r.gate.wait(ctx) }
+	var sum []byte
 	for attempt := 1; ; attempt++ {
 		stage := "copying"
 		if attempt > 1 {
@@ -526,13 +636,14 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 		}
 		sl.set(stage, dst)
 		sl.bytes.Store(0)
-		sum, err := copyFile(ctx, j.src, dst, j.info, atime, mtime, wait, func(n int64) {
+		var err error
+		sum, err = copyFile(ctx, j.src, dst, j.info, atime, mtime, wait, func(n int64) {
 			r.bytes.Add(n)
 			sl.counted.Add(n)
 			sl.bytes.Add(n)
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !r.opt.Verify {
 			break
@@ -541,7 +652,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 		sl.bytes.Store(0)
 		ok, err := verifyFile(dst, sum, wait, func(n int64) { sl.bytes.Add(n) })
 		if err != nil {
-			return fmt.Errorf("verify: %w", err)
+			return nil, fmt.Errorf("verify: %w", err)
 		}
 		if ok {
 			r.verified.Add(1)
@@ -549,7 +660,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 		}
 		os.Remove(dst)
 		if attempt == 2 {
-			return errors.New("verify: destination checksum mismatch twice, copy removed (failing disk or card?)")
+			return nil, errors.New("verify: destination checksum mismatch twice, copy removed (failing disk or card?)")
 		}
 		r.logf(fmt.Sprintf("WARN %s: destination checksum mismatch, copying again", dst))
 		r.bytes.Add(-sl.counted.Load())
@@ -558,10 +669,10 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 	if r.opt.Move {
 		sl.set("removing source", "")
 		if err := os.Remove(j.src); err != nil {
-			return fmt.Errorf("copied but could not remove source: %w", err)
+			return nil, fmt.Errorf("copied but could not remove source: %w", err)
 		}
 	}
-	return nil
+	return sum, nil
 }
 
 // recoverPending handles a file whose transfer an interrupted run had started.
@@ -591,167 +702,6 @@ func (r *runner) recoverPending(j job, dst string, sl *slot) bool {
 	r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
 	r.logf(fmt.Sprintf("RESUME %s already complete at %s", j.src, dst))
 	return true
-}
-
-// verifyFile re-reads p from the disk (not the page cache) and compares its
-// SHA-256 with want.
-func verifyFile(p string, want []byte, wait func() error, onBytes func(int64)) (bool, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-	// The copy was fsynced, so its pages are clean and can be dropped; the
-	// read below then has to come from the device itself.
-	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
-	h := sha256.New()
-	buf := make([]byte, 1<<20)
-	for {
-		if err := wait(); err != nil {
-			return false, err
-		}
-		n, rerr := f.Read(buf)
-		if n > 0 {
-			h.Write(buf[:n])
-			onBytes(int64(n))
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return false, rerr
-		}
-	}
-	return bytes.Equal(h.Sum(nil), want), nil
-}
-
-// copyFile copies src to dst via a temporary file, fsyncs it, restores the
-// permissions and timestamps, and returns the SHA-256 of the data written.
-func copyFile(ctx context.Context, src, dst string, info fs.FileInfo, atime, mtime time.Time, wait func() error, onBytes func(int64)) ([]byte, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return nil, err
-	}
-	defer in.Close()
-
-	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm()|0o600)
-	if err != nil {
-		return nil, err
-	}
-	ok := false
-	defer func() {
-		if !ok {
-			out.Close()
-			os.Remove(tmp)
-		}
-	}()
-
-	h := sha256.New()
-	buf := make([]byte, 1<<20)
-	w := io.MultiWriter(out, h)
-	for {
-		if err := wait(); err != nil {
-			return nil, err
-		}
-		n, rerr := in.Read(buf)
-		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
-				return nil, err
-			}
-			onBytes(int64(n))
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return nil, rerr
-		}
-	}
-	if err := out.Sync(); err != nil {
-		return nil, err
-	}
-	if err := out.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Chtimes(tmp, atime, mtime); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return nil, err
-	}
-	ok = true
-	return h.Sum(nil), nil
-}
-
-func fileHash(p string) ([]byte, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var h hash.Hash = sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
-	}
-	return h.Sum(nil), nil
-}
-
-// compare checks whether src and an existing destination file are identical,
-// reporting progress on the worker's slot and in the overall total. If they
-// differ, the bytes counted so far are taken back out of the total, since the
-// file will be copied (and counted) again.
-func (r *runner) compare(ctx context.Context, j job, existing string, sl *slot) (bool, error) {
-	sl.set("checking if already imported", existing)
-	sl.bytes.Store(0)
-	same, err := sameContent(j.src, existing, func() error { return r.gate.wait(ctx) }, func(n int64) {
-		sl.bytes.Add(n)
-		sl.counted.Add(n)
-		r.bytes.Add(n)
-	})
-	if err != nil || !same {
-		r.bytes.Add(-sl.counted.Swap(0))
-		sl.bytes.Store(0)
-	}
-	return same, err
-}
-
-// sameContent compares two files chunk by chunk, stopping at the first
-// difference. onBytes is called with the number of bytes compared.
-func sameContent(a, b string, wait func() error, onBytes func(int64)) (bool, error) {
-	fa, err := os.Open(a)
-	if err != nil {
-		return false, err
-	}
-	defer fa.Close()
-	fb, err := os.Open(b)
-	if err != nil {
-		return false, err
-	}
-	defer fb.Close()
-	const chunk = 1 << 20
-	ba, bb := make([]byte, chunk), make([]byte, chunk)
-	for {
-		if err := wait(); err != nil {
-			return false, err
-		}
-		na, ea := io.ReadFull(fa, ba)
-		nb, eb := io.ReadFull(fb, bb)
-		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
-			return false, nil
-		}
-		onBytes(int64(na))
-		endA := ea == io.EOF || ea == io.ErrUnexpectedEOF
-		endB := eb == io.EOF || eb == io.ErrUnexpectedEOF
-		switch {
-		case ea != nil && !endA:
-			return false, ea
-		case eb != nil && !endB:
-			return false, eb
-		case endA || endB:
-			return endA && endB, nil
-		}
-	}
 }
 
 func accessTime(fi fs.FileInfo) time.Time {

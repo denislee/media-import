@@ -20,6 +20,8 @@ type settings struct {
 	Kinds        map[string]bool `json:"kinds"`
 	Move         bool            `json:"move"`
 	SkipDups     bool            `json:"skip_dups"`
+	DupCheck     string          `json:"dup_check"`    // importer.DupCheckFast or DupCheckFull
+	DupAnyName   bool            `json:"dup_any_name"` // also detect copies under other names
 	Verify       bool            `json:"verify"`
 	FFprobe      bool            `json:"ffprobe"`
 	MtimeCapture bool            `json:"mtime_capture"`
@@ -37,6 +39,7 @@ func defaultSettings() settings {
 		CustomName: "{YYYY}{MM}{DD}_{hh}{mm}{ss}_{name}",
 		Kinds:      map[string]bool{"Photos": true, "RAW": true, "Videos": true, "Audio": false},
 		SkipDups:   true,
+		DupCheck:   importer.DupCheckFast,
 		FFprobe:    true,
 	}
 }

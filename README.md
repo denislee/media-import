@@ -41,8 +41,15 @@ wlroots compositors and runs without XWayland.
   next launch. Finished files are skipped, half-written `.part` files are cleaned up, and a copy that
   completed just before the interruption is recognised. If the card is mounted at a different path,
   put the new path in *Source* and press *Resume*.
-- Skips duplicates (same size and SHA-256), with optional checksum verification,
-  **move** mode (the source is deleted only after a successful, verified copy), and a **dry run**.
+- Skips files that are **already in the destination**. *Quick* mode (the default) treats a file as a
+  duplicate when the size and modified time match and the first, middle and last 64 KiB are
+  identical. *Full* mode compares every byte. Each import adds its copies to an index in
+  `<destination>/.media-import/index`, so when you insert the same card again, the files imported
+  earlier are recognised without reading their dates or contents. Every index hit is checked
+  against the file on disk. You can also turn on detection of copies stored under a different name
+  (for example after changing the folder layout); this matches them by checksum. Duplicates are
+  never deleted from the source, even in move mode.
+- Optional checksum verification, **move** mode (the source is deleted only after a successful, verified copy), and a **dry run**.
 - **Detailed progress**: an overall progress bar (percent and bytes) and a file-count bar.
   Statistics show files done/total, imported/skipped/failed, current and average speed, elapsed time,
   time remaining and a per-type breakdown. Each file being worked on gets its own row with a bar,
