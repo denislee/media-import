@@ -146,12 +146,11 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 	}
 
 	th := s.th
-	btn := func(c *widget.Clickable, label string) layout.FlexChild {
+	btn := func(c *widget.Clickable, ic *widget.Icon, label string) layout.FlexChild {
 		return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			bs := material.Button(th, c, label)
-			bs.Background = rgb(0x50545e)
-			bs.Inset = layout.UniformInset(8)
-			return layout.Inset{Right: 6}.Layout(gtx, bs.Layout)
+			return layout.Inset{Right: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return s.button(gtx, c, ic, label, btnSecondary)
+			})
 		})
 	}
 	hiddenLabel := "Show hidden"
@@ -159,7 +158,7 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 		hiddenLabel = "Hide hidden"
 	}
 
-	return layout.UniformInset(16).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+	return layout.UniformInset(20).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				l := material.H6(th, b.title)
@@ -169,8 +168,8 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 			layout.Rigid(spacer(0, 10)),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					btn(&b.upBtn, "↑ Up"), btn(&b.homeBtn, "Home"), btn(&b.mediaBtn, "Removable media"),
-					btn(&b.rootBtn, "/"), btn(&b.hiddenToggle, hiddenLabel),
+					btn(&b.upBtn, icUp, "Up"), btn(&b.homeBtn, icHome, "Home"), btn(&b.mediaBtn, icCard, "Removable media"),
+					btn(&b.rootBtn, icStorage, "/"), btn(&b.hiddenToggle, nil, hiddenLabel),
 				)
 			}),
 			layout.Rigid(spacer(0, 8)),
@@ -178,7 +177,7 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return s.editor(gtx, &b.pathEd, "/path") }),
 					layout.Rigid(spacer(8, 0)),
-					layout.Rigid(material.Button(th, &b.goBtn, "Go").Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return s.button(gtx, &b.goBtn, nil, "Go", btnSecondary) }),
 				)
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -186,7 +185,7 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 					return layout.Dimensions{}
 				}
 				l := material.Body2(th, b.err)
-				l.Color = rgb(0xff6b6b)
+				l.Color = s.pal.err
 				return layout.Inset{Top: 6}.Layout(gtx, l.Layout)
 			}),
 			layout.Rigid(spacer(0, 8)),
@@ -199,7 +198,17 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 					return material.List(th, &b.list).Layout(gtx, len(b.entries), func(gtx layout.Context, i int) layout.Dimensions {
 						return material.Clickable(gtx, &b.clicks[i], func(gtx layout.Context) layout.Dimensions {
 							gtx.Constraints.Min.X = gtx.Constraints.Max.X
-							return layout.Inset{Top: 6, Bottom: 6, Left: 8}.Layout(gtx, material.Body1(th, "📁  "+b.entries[i]).Layout)
+							return layout.Inset{Top: 7, Bottom: 7, Left: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(icon(icFolder, 20, s.pal.accent)),
+									layout.Rigid(spacer(10, 0)),
+									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+										l := material.Body1(th, b.entries[i])
+										l.MaxLines = 1
+										return l.Layout(gtx)
+									}),
+								)
+							})
 						})
 					})
 				})
@@ -211,15 +220,17 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 					children = append(children,
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return s.editor(gtx, &b.newEd, "New folder name") }),
 						layout.Rigid(spacer(8, 0)),
-						btn(&b.newBtn, "Create folder"),
+						btn(&b.newBtn, icNewDir, "Create folder"),
 					)
 				} else {
 					children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return layout.Dimensions{} }))
 				}
 				children = append(children,
 					layout.Rigid(spacer(12, 0)),
-					btn(&b.cancelBtn, "Cancel"),
-					layout.Rigid(material.Button(th, &b.chooseBtn, "Use this folder").Layout),
+					btn(&b.cancelBtn, nil, "Cancel"),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return s.button(gtx, &b.chooseBtn, icCheck, "Use this folder", btnPrimary)
+					}),
 				)
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
 			}),
