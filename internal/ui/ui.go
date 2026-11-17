@@ -30,6 +30,7 @@ import (
 
 	"github.com/denislee/media-import/internal/devices"
 	"github.com/denislee/media-import/internal/importer"
+	"github.com/denislee/media-import/internal/logbuf"
 	"github.com/denislee/media-import/internal/media"
 	"github.com/denislee/media-import/internal/organize"
 )
@@ -70,6 +71,7 @@ type state struct {
 	ejectBtns []widget.Clickable
 	unmounted []devices.Unmounted
 	mountBtns []widget.Clickable
+	unm       devices.UnmountedCache // runs lsblk only when block devices or mounts changed
 
 	// Mount/eject state (guarded by mu).
 	opBusy      bool
@@ -95,7 +97,7 @@ type state struct {
 	resMeta  *resumeMeta
 	resState *importer.ResumeState
 	status   string
-	logs     []string
+	logs     *logbuf.Buffer
 
 	browser *browser
 }
@@ -129,6 +131,7 @@ func newState(w *app.Window) *state {
 	}
 
 	s := &state{win: w, th: th, kinds: map[media.Kind]*widget.Bool{}}
+	s.logs = logbuf.New(maxLogLines)
 	for _, e := range []*widget.Editor{&s.srcEd, &s.dstEd, &s.customDirEd, &s.customNameEd} {
 		e.SingleLine = true
 	}
@@ -158,13 +161,16 @@ func newState(w *app.Window) *state {
 	s.resMeta, s.resState = loadResume()
 
 	s.refreshVolumes()
-	go func() {
-		for range time.Tick(2 * time.Second) {
-			if s.refreshVolumes() {
-				w.Invalidate()
-			}
+	// Volumes are refreshed on kernel mount/block events (no idle lsblk forks);
+	// the 10 s fallback covers gvfs mounts, which raise neither.
+	go devices.Watch(context.Background(), 10*time.Second, func(block bool) {
+		if block {
+			s.unm.Invalidate()
 		}
-	}()
+		if s.refreshVolumes() {
+			w.Invalidate()
+		}
+	})
 	return s
 }
 
@@ -195,10 +201,10 @@ func (s *state) loop() error {
 // refreshVolumes reloads mounted volumes; reports whether the list changed.
 func (s *state) refreshVolumes() bool {
 	vols := devices.List()
-	unm := devices.ListUnmounted()
+	unm := s.unm.Get()
 	s.volMu.Lock()
 	defer s.volMu.Unlock()
-	if fmt.Sprint(vols) == fmt.Sprint(s.vols) && fmt.Sprint(unm) == fmt.Sprint(s.unmounted) {
+	if slices.Equal(vols, s.vols) && slices.Equal(unm, s.unmounted) {
 		return false
 	}
 	s.vols, s.unmounted = vols, unm
@@ -273,6 +279,7 @@ func (s *state) runOp(op privOp, password string) {
 		s.mu.Unlock()
 		if err == nil {
 			op.done(res)
+			s.unm.Invalidate()
 			s.refreshVolumes()
 		} else if s.authOp == nil {
 			s.addLog(op.verb + " failed: " + err.Error())
@@ -330,13 +337,17 @@ func (s *state) nameTemplate() string {
 }
 
 func (s *state) addLog(line string) {
-	s.mu.Lock()
-	s.logs = append(s.logs, time.Now().Format("15:04:05 ")+line)
-	if len(s.logs) > maxLogLines {
-		s.logs = append([]string(nil), s.logs[len(s.logs)-maxLogLines:]...)
-	}
-	s.mu.Unlock()
+	s.appendLog(line)
 	s.win.Invalidate()
+}
+
+// appendLog records line without asking for a redraw. It is used by the
+// importer's log callback, whose lines are drawn by the 100 ms progress tick's
+// invalidation rather than one redraw per line.
+func (s *state) appendLog(line string) {
+	s.mu.Lock()
+	s.logs.Append(time.Now().Format("15:04:05 ") + line)
+	s.mu.Unlock()
 }
 
 func (s *state) start() {
@@ -464,7 +475,7 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 				s.win.Option(app.Title(title))
 			}
 			s.win.Invalidate()
-		}, s.addLog)
+		}, s.appendLog)
 		msg := fmt.Sprintf("%s finished: %d imported, %d skipped, %d failed, %s in %s",
 			mode, sum.Copied, sum.Skipped, sum.Failed, humanBytes(sum.Bytes), sum.Elapsed.Round(time.Second))
 		switch {
@@ -548,7 +559,7 @@ func (s *state) layout(gtx layout.Context) layout.Dimensions {
 	}
 	if s.clearLogBtn.Clicked(gtx) {
 		s.mu.Lock()
-		s.logs = nil
+		s.logs.Reset()
 		s.mu.Unlock()
 	}
 	if s.srcBrowse.Clicked(gtx) {
@@ -845,7 +856,7 @@ func (s *state) templateSection(gtx layout.Context, enum *widget.Enum, presets [
 }
 
 func (s *state) optionsSection(gtx layout.Context) layout.Dimensions {
-	ffLabel := "Use ffprobe for other formats (mkv, avi, heic…)"
+	ffLabel := "Use ffprobe for other video and audio formats (mkv, avi, mts…)"
 	ffGtx := gtx
 	if !media.FFprobeAvailable() {
 		ffLabel = "Use ffprobe (not installed)"
@@ -921,7 +932,7 @@ func dupSummary(p importer.Progress) string {
 func (s *state) runPanel(gtx layout.Context, running bool) layout.Dimensions {
 	s.mu.Lock()
 	p, status, speed, dest := s.prog, s.status, s.speed, s.runDest
-	logs := s.logs
+	logs := s.logs.Lines()
 	s.mu.Unlock()
 
 	line := status

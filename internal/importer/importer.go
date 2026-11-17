@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/denislee/media-import/internal/media"
 	"github.com/denislee/media-import/internal/organize"
+	"golang.org/x/sys/unix"
 )
 
 // Options configures an import run.
@@ -149,9 +151,11 @@ type runner struct {
 	dupQuick, dupFull, dupIndexed, dupOthr atomic.Int64
 	idx                                    *index
 	dirs                                   sync.Map // directories known to exist
+	devs                                   sync.Map // dir → device id (uint64)
 
 	mu       sync.Mutex
 	reserved map[string]resv
+	seen     map[string]int64 // destination paths known to exist → size (-1: not a regular file)
 	errs     []string
 }
 
@@ -164,7 +168,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	if err := validate(&opt); err != nil {
 		return Summary{}, err
 	}
-	r := &runner{opt: opt, logf: logf, reserved: map[string]resv{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
+	r := &runner{opt: opt, logf: logf, reserved: map[string]resv{}, seen: map[string]int64{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
 	if r.gate == nil {
 		r.gate = &Gate{}
 	}
@@ -212,6 +216,19 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 		r.phase.Store("importing")
 		r.total.Store(int64(len(jobs)))
 		r.jnl.write("T", strconv.Itoa(len(jobs)), strconv.FormatInt(r.totalBytes.Load(), 10))
+		if !opt.DryRun {
+			need := r.totalBytes.Load()
+			if rs := opt.Resume; rs != nil {
+				for _, j := range jobs {
+					if rs.Done[j.src] {
+						need -= j.info.Size()
+					}
+				}
+			}
+			if free, ok := freeBytesFn(opt.Dest); ok && need > free {
+				logf(fmt.Sprintf("WARN destination has %s free but up to %s may be copied (duplicates are skipped, so it may still fit)", humanSize(free), humanSize(need)))
+			}
+		}
 		err = r.process(ctx, jobs)
 	}
 	close(stopTicker)
@@ -411,6 +428,10 @@ loop:
 	return ctx.Err()
 }
 
+// crashPoint is called at the points of a transfer where a crash changes
+// what resume must do; tests make it return an error to simulate one.
+var crashPoint = func(string) error { return nil }
+
 // captureTime is media.CaptureTime; tests replace it to count calls.
 var captureTime = media.CaptureTime
 
@@ -427,13 +448,13 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 			r.bytes.Add(j.info.Size())
 			return
 		}
-		if dst, ok := rs.Pending[j.src]; ok && r.recoverPending(j, dst, sl) {
+		if dst, ok := rs.Pending[j.src]; ok && r.recoverPending(ctx, j, dst, sl) {
 			return
 		}
 	}
 	if r.opt.SkipDups {
 		if dst, how := r.indexHit(ctx, j, sl); how != notDup {
-			r.skipDup(j, sl, dst, how, nil)
+			r.skipDup(j, sl, dst, how, digests{})
 			return
 		}
 	}
@@ -460,14 +481,15 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		return
 	}
 	if dup != notDup {
-		r.skipDup(j, sl, dst, dup, nil)
+		r.skipDup(j, sl, dst, dup, digests{})
 		return
 	}
 	written := false
-	defer func() { r.release(dst, written) }()
+	defer func() { r.release(dst, written, j.info.Size()) }()
+	var known []byte
 
 	if r.opt.SkipDups && r.opt.DupAnyName {
-		other, sum, err := r.otherNameHit(ctx, j, sl)
+		other, d, err := r.otherNameHit(ctx, j, sl)
 		if err != nil {
 			if ctx.Err() == nil {
 				r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
@@ -476,9 +498,10 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 			return
 		}
 		if other != "" {
-			r.skipDup(j, sl, other, dupOther, sum)
+			r.skipDup(j, sl, other, dupOther, d)
 			return
 		}
+		known = d.sha // the source was hashed already; the copy need not hash it again
 	}
 
 	verb := "COPY"
@@ -498,9 +521,9 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		mtime = t
 	}
 	err = r.ensureDir(filepath.Dir(dst))
-	var sum []byte
+	var d digests
 	if err == nil {
-		sum, err = r.transfer(ctx, j, dst, mtime, sl)
+		d, err = r.transfer(ctx, j, dst, mtime, sl, known)
 	}
 	if err != nil {
 		if ctx.Err() == nil {
@@ -511,9 +534,13 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	}
 	written = true
 	r.jnl.done(j.src, dst)
+	if err := crashPoint("done"); err != nil {
+		r.fail("%s: %v", j.src, err)
+		return
+	}
 	r.copied.Add(1)
 	r.byKind[j.kind].Add(1)
-	r.record(j, dst, sum)
+	r.record(j, dst, d)
 	r.logf(fmt.Sprintf("%s %s -> %s [%s]", verb, j.src, dst, how))
 }
 
@@ -522,7 +549,7 @@ func srcKey(j job) idxKey {
 }
 
 // record adds a destination index entry for j stored at dst.
-func (r *runner) record(j job, dst string, sum []byte) {
+func (r *runner) record(j job, dst string, d digests) {
 	if r.idx == nil || r.opt.DryRun {
 		return
 	}
@@ -530,14 +557,14 @@ func (r *runner) record(j job, dst string, sum []byte) {
 	if err != nil {
 		return
 	}
-	if err := r.idx.add(srcKey(j), dst, st.ModTime(), sum); err != nil {
+	if err := r.idx.add(srcKey(j), dst, st.ModTime(), d); err != nil {
 		r.logf("WARN cannot update destination index: " + err.Error())
 	}
 }
 
 // skipDup finishes a source that is already in the destination at dst. It is
 // left on the source, even when moving.
-func (r *runner) skipDup(j job, sl *slot, dst string, how dupHow, sum []byte) {
+func (r *runner) skipDup(j job, sl *slot, dst string, how dupHow, d digests) {
 	r.skipped.Add(1)
 	r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
 	r.jnl.done(j.src, dst)
@@ -550,7 +577,7 @@ func (r *runner) skipDup(j job, sl *slot, dst string, how dupHow, sum []byte) {
 		} else {
 			r.dupOthr.Add(1)
 		}
-		r.record(j, dst, sum)
+		r.record(j, dst, d)
 	case dupIndexed:
 		r.dupIndexed.Add(1)
 	}
@@ -568,7 +595,13 @@ func (r *runner) indexHit(ctx context.Context, j job, sl *slot) (string, dupHow)
 	for _, e := range r.idx.lookup(srcKey(j)) {
 		dst := filepath.Join(r.opt.Dest, e.rel)
 		st, err := os.Stat(dst)
-		if err != nil || !st.Mode().IsRegular() || st.Size() != e.key.size || st.ModTime().UnixNano() != e.dmtime {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				r.idx.remove(e.key, e.rel)
+			}
+			continue
+		}
+		if !st.Mode().IsRegular() || st.Size() != e.key.size || st.ModTime().UnixNano() != e.dmtime {
 			continue
 		}
 		if r.opt.DupCheck != DupCheckFull {
@@ -581,54 +614,87 @@ func (r *runner) indexHit(ctx context.Context, j job, sl *slot) (string, dupHow)
 	return "", notDup
 }
 
-// otherNameHit hashes the source and looks for an indexed destination file
-// with the same size and checksum, wherever it is stored. It only reads the
-// source when the index knows a file of the same size.
-func (r *runner) otherNameHit(ctx context.Context, j job, sl *slot) (string, []byte, error) {
-	cands := r.idx.withSize(j.info.Size())
+// otherNameHit looks for an indexed destination file with the same size and
+// checksum as the source, wherever it is stored. It reads the source only
+// when the index knows a file of the same size, and then compares sample
+// digests (192 KiB read) first: the whole source is hashed only if a sample
+// matches or a candidate has none (indexed by an older version). It returns
+// the digests it computed, so the copy can reuse them.
+func (r *runner) otherNameHit(ctx context.Context, j job, sl *slot) (string, digests, error) {
+	size := j.info.Size()
+	cands := r.idx.withSize(size)
 	if len(cands) == 0 {
-		return "", nil, nil
+		return "", digests{}, nil
 	}
 	defer r.timeDup(time.Now())
 	sl.set(stageOtherNm, "")
 	sl.bytes.Store(0)
+	var d digests
+	if slices.ContainsFunc(cands, func(e idxEntry) bool { return e.sample != nil }) {
+		sample, n, err := sampleDigest(j.src, size)
+		r.dupBytes.Add(n)
+		if err != nil {
+			return "", digests{}, err
+		}
+		d.sample = sample
+		if !slices.ContainsFunc(cands, func(e idxEntry) bool { return e.sample == nil || bytes.Equal(e.sample, sample) }) {
+			sl.set("preparing", "")
+			return "", d, nil
+		}
+	}
 	sum, err := hashFile(j.src, func() error { return r.gate.wait(ctx) }, func(n int64) {
 		r.dupBytes.Add(n)
 		sl.bytes.Add(n)
-	})
+	}, false)
 	if err != nil {
-		return "", nil, err
+		return "", digests{}, err
 	}
+	d.sha = sum
 	for _, e := range cands {
 		if !bytes.Equal(e.sha, sum) {
 			continue
 		}
 		dst := filepath.Join(r.opt.Dest, e.rel)
-		if st, err := os.Stat(dst); err == nil && st.Size() == e.key.size && st.ModTime().UnixNano() == e.dmtime {
-			return dst, sum, nil
+		st, err := os.Stat(dst)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				r.idx.remove(e.key, e.rel)
+			}
+			continue
+		}
+		if st.Size() == e.key.size && st.ModTime().UnixNano() == e.dmtime {
+			return dst, d, nil
 		}
 	}
 	sl.set("preparing", "")
-	return "", nil, nil
+	return "", d, nil
 }
 
-// transfer copies or moves j to dst and returns the SHA-256 of the data
-// written (nil when the file was renamed in place).
-func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Time, sl *slot) ([]byte, error) {
+// transfer copies or moves j to dst and returns the digests of the data
+// written (none when the file was renamed in place). known is the source's
+// SHA-256 when it was computed already.
+func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Time, sl *slot, known []byte) (digests, error) {
 	atime := accessTime(j.info)
 	size := j.info.Size()
-	r.jnl.begin(j.src, dst)
-	if r.opt.Move && sameDevice(j.info, filepath.Dir(dst)) {
+	// The B record must be durable before the copy appears under its final
+	// name, or a crash in between would leave a file resume does not know
+	// about (and would import again as name_1). A same-device rename needs no
+	// such barrier: once it happened the source is gone and is not rescanned.
+	seq := r.jnl.begin(j.src, dst)
+	if err := crashPoint("begun"); err != nil {
+		return digests{}, err
+	}
+	if r.opt.Move && r.sameDevice(j.info, filepath.Dir(dst)) {
 		sl.set("moving", dst)
 		if err := os.Rename(j.src, dst); err == nil {
 			r.bytes.Add(size)
 			sl.counted.Store(size)
 			sl.bytes.Store(size)
-			return nil, os.Chtimes(dst, atime, mtime)
+			return digests{}, os.Chtimes(dst, atime, mtime)
 		}
 	}
 	wait := func() error { return r.gate.wait(ctx) }
-	var sum []byte
+	var d digests
 	for attempt := 1; ; attempt++ {
 		stage := "copying"
 		if attempt > 1 {
@@ -637,22 +703,30 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 		sl.set(stage, dst)
 		sl.bytes.Store(0)
 		var err error
-		sum, err = copyFile(ctx, j.src, dst, j.info, atime, mtime, wait, func(n int64) {
+		d, err = copyFile(ctx, j.src, dst, j.info, atime, mtime, wait, func(n int64) {
 			r.bytes.Add(n)
 			sl.counted.Add(n)
 			sl.bytes.Add(n)
-		})
+		}, func() error {
+			if err := crashPoint("before-rename"); err != nil {
+				return err
+			}
+			return r.jnl.syncTo(seq)
+		}, known)
 		if err != nil {
-			return nil, err
+			return digests{}, err
+		}
+		if err := crashPoint("renamed"); err != nil {
+			return digests{}, err
 		}
 		if !r.opt.Verify {
 			break
 		}
 		sl.set("verifying", "")
 		sl.bytes.Store(0)
-		ok, err := verifyFile(dst, sum, wait, func(n int64) { sl.bytes.Add(n) })
+		ok, err := verifyFile(dst, d.sha, wait, func(n int64) { sl.bytes.Add(n) })
 		if err != nil {
-			return nil, fmt.Errorf("verify: %w", err)
+			return digests{}, fmt.Errorf("verify: %w", err)
 		}
 		if ok {
 			r.verified.Add(1)
@@ -660,7 +734,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 		}
 		os.Remove(dst)
 		if attempt == 2 {
-			return nil, errors.New("verify: destination checksum mismatch twice, copy removed (failing disk or card?)")
+			return digests{}, errors.New("verify: destination checksum mismatch twice, copy removed (failing disk or card?)")
 		}
 		r.logf(fmt.Sprintf("WARN %s: destination checksum mismatch, copying again", dst))
 		r.bytes.Add(-sl.counted.Load())
@@ -669,16 +743,16 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 	if r.opt.Move {
 		sl.set("removing source", "")
 		if err := os.Remove(j.src); err != nil {
-			return nil, fmt.Errorf("copied but could not remove source: %w", err)
+			return digests{}, fmt.Errorf("copied but could not remove source: %w", err)
 		}
 	}
-	return sum, nil
+	return d, nil
 }
 
 // recoverPending handles a file whose transfer an interrupted run had started.
 // It removes a leftover temp file and, if the destination was completed,
 // records it as done. It reports whether the file needs no further work.
-func (r *runner) recoverPending(j job, dst string, sl *slot) bool {
+func (r *runner) recoverPending(ctx context.Context, j job, dst string, sl *slot) bool {
 	part := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
 	if err := os.Remove(part); err == nil {
 		r.logf("RESUME removed incomplete " + part)
@@ -687,7 +761,7 @@ func (r *runner) recoverPending(j job, dst string, sl *slot) bool {
 	if err != nil || st.Size() != j.info.Size() {
 		return false
 	}
-	same, err := r.compare(context.Background(), j, dst, sl)
+	same, err := r.compare(ctx, j, dst, sl)
 	if err != nil || !same {
 		r.logf(fmt.Sprintf("WARN %s exists but differs from %s; importing again under a new name", dst, j.src))
 		return false
@@ -711,14 +785,57 @@ func accessTime(fi fs.FileInfo) time.Time {
 	return fi.ModTime()
 }
 
-func sameDevice(fi fs.FileInfo, dir string) bool {
+func (r *runner) sameDevice(fi fs.FileInfo, dir string) bool {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return false
+	}
+	if v, ok := r.devs.Load(dir); ok {
+		return v.(uint64) == uint64(st.Dev)
 	}
 	var ds syscall.Stat_t
 	if err := syscall.Stat(dir, &ds); err != nil {
 		return false
 	}
+	r.devs.Store(dir, uint64(ds.Dev))
 	return st.Dev == ds.Dev
+}
+
+// freeBytesFn is freeBytes; tests replace it to force a low-space warning.
+var freeBytesFn = freeBytes
+
+// freeBytes reports the space available to unprivileged users on the
+// filesystem holding dir. The destination tree often does not exist yet, so
+// it walks up to the nearest path that does.
+func freeBytes(dir string) (int64, bool) {
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return 0, false
+		}
+		dir = parent
+	}
+	var st unix.Statfs_t
+	if err := unix.Statfs(dir, &st); err != nil {
+		return 0, false
+	}
+	return int64(st.Bavail) * int64(st.Bsize), true
+}
+
+// humanSize formats n with 1024-based units: "512 B", "1.5 KiB", "3.0 GiB".
+func humanSize(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	const units = "KMGTPE"
+	v := float64(n)
+	i := -1
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	return fmt.Sprintf("%.1f %ciB", v, units[i])
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
@@ -66,6 +67,9 @@ const (
 	stageOtherNm = "looking for copies under other names"
 )
 
+// statCand is os.Stat for reserve; tests replace it to count probes.
+var statCand = os.Stat
+
 var bufPool = sync.Pool{New: func() any { b := make([]byte, bufSize); return &b }}
 
 func getBuf() *[]byte  { return bufPool.Get().(*[]byte) }
@@ -93,11 +97,18 @@ func (r *runner) reserve(ctx context.Context, dir, name string, j job, expect [2
 		}
 		r.mu.Lock()
 		before := r.reserved[cand]
+		known, seen := r.seen[cand]
 		r.mu.Unlock()
 		if before == resvBusy {
 			continue
 		}
-		st, err := os.Stat(cand)
+		// A path this run already found (or wrote) cannot be free, and can be
+		// a duplicate only if its size matches: skip the stat otherwise. This
+		// keeps many same-named sources at O(1) stats each instead of O(n).
+		if seen && (!r.opt.SkipDups || known != size) {
+			continue
+		}
+		st, err := statCand(cand)
 		if errors.Is(err, fs.ErrNotExist) {
 			r.mu.Lock()
 			now := r.reserved[cand]
@@ -118,6 +129,13 @@ func (r *runner) reserve(ctx context.Context, dir, name string, j job, expect [2
 		if err != nil {
 			return "", notDup, err
 		}
+		r.mu.Lock()
+		if st.Mode().IsRegular() {
+			r.seen[cand] = st.Size()
+		} else {
+			r.seen[cand] = -1 // never a duplicate candidate
+		}
+		r.mu.Unlock()
 		if !r.opt.SkipDups || st.Size() != size || !st.Mode().IsRegular() {
 			continue
 		}
@@ -135,10 +153,11 @@ func (r *runner) reserve(ctx context.Context, dir, name string, j job, expect [2
 
 // release ends a reservation. A path that was written stays known to the
 // run so concurrent reservations re-check it (see reserve).
-func (r *runner) release(p string, written bool) {
+func (r *runner) release(p string, written bool, size int64) {
 	r.mu.Lock()
 	if written {
 		r.reserved[p] = resvWritten
+		r.seen[p] = size
 	} else if r.reserved[p] == resvBusy {
 		delete(r.reserved, p)
 	}
@@ -220,7 +239,10 @@ func sampledSame(a, b string, size int64) (bool, int64, error) {
 		return false, 0, err
 	}
 	defer fb.Close()
-	ba, bb := make([]byte, sampleSize), make([]byte, sampleSize)
+	pa, pb := getBuf(), getBuf()
+	defer putBuf(pa)
+	defer putBuf(pb)
+	ba, bb := (*pa)[:sampleSize], (*pb)[:sampleSize]
 	var read int64
 	for _, off := range [...]int64{0, size/2 - sampleSize/2, size - sampleSize} {
 		na, err := fa.ReadAt(ba, off)
@@ -267,7 +289,7 @@ func (r *runner) compareHashed(ctx context.Context, j job, existing string, sl *
 	sl.bytes.Store(0)
 	wait := func() error { return r.gate.wait(ctx) }
 	if *srcSum == nil {
-		s, err := hashFile(j.src, wait, func(n int64) { r.dupBytes.Add(n) })
+		s, err := hashFile(j.src, wait, func(n int64) { r.dupBytes.Add(n) }, false)
 		if err != nil {
 			return false, err
 		}
@@ -278,8 +300,7 @@ func (r *runner) compareHashed(ctx context.Context, j job, existing string, sl *
 		sl.bytes.Add(n)
 		sl.counted.Add(n)
 		r.bytes.Add(n)
-	})
-	dropCache(existing)
+	}, true)
 	same := err == nil && bytes.Equal(d, *srcSum)
 	if !same {
 		r.bytes.Add(-sl.counted.Swap(0))
@@ -347,13 +368,18 @@ func sameContent(a, b string, wait func() error, onBytes func(int64)) (bool, err
 	}
 }
 
-// hashFile returns the SHA-256 of p, calling wait before each chunk.
-func hashFile(p string, wait func() error, onBytes func(int64)) ([]byte, error) {
+// hashFile returns the SHA-256 of p, calling wait before each chunk. With
+// dropAfter the file's pages are dropped from the page cache once hashed, so
+// a large destination file does not stay resident.
+func hashFile(p string, wait func() error, onBytes func(int64), dropAfter bool) ([]byte, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	if dropAfter {
+		defer func() { _ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED) }()
+	}
 	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_SEQUENTIAL)
 	return hashReader(f, wait, onBytes)
 }
@@ -382,14 +408,7 @@ func hashReader(f io.Reader, wait func() error, onBytes func(int64)) ([]byte, er
 }
 
 func fileHash(p string) ([]byte, error) {
-	return hashFile(p, func() error { return nil }, func(int64) {})
-}
-
-func dropCache(p string) {
-	if f, err := os.Open(p); err == nil {
-		_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
-		f.Close()
-	}
+	return hashFile(p, func() error { return nil }, func(int64) {}, false)
 }
 
 // verifyFile re-reads p from the disk (not the page cache) and compares its
@@ -410,19 +429,35 @@ func verifyFile(p string, want []byte, wait func() error, onBytes func(int64)) (
 	return bytes.Equal(got, want), nil
 }
 
+// preallocate reserves size bytes for f, so a copy that cannot possibly fit
+// fails before it writes anything. Only a real "no space left" error is
+// returned: filesystems without fallocate support (EOPNOTSUPP and friends)
+// simply allocate as the data arrives.
+func preallocate(f *os.File, size int64) error {
+	err := unix.Fallocate(int(f.Fd()), unix.FALLOC_FL_KEEP_SIZE, 0, size) // keep the size: a short copy must not gain zero padding
+	if errors.Is(err, unix.ENOSPC) {
+		return err
+	}
+	return nil
+}
+
 // copyFile copies src to dst via a temporary file, fsyncs it, restores the
 // permissions and timestamps, and returns the SHA-256 of the data written.
-func copyFile(ctx context.Context, src, dst string, info fs.FileInfo, atime, mtime time.Time, wait func() error, onBytes func(int64)) ([]byte, error) {
+// beforeRename runs just before the temporary file is renamed to dst; an
+// error from it aborts the copy. When knownSum (the source's SHA-256) is
+// given, the data is not hashed again and knownSum is returned.
+func copyFile(ctx context.Context, src, dst string, info fs.FileInfo, atime, mtime time.Time, wait func() error, onBytes func(int64), beforeRename func() error, knownSum []byte) (digests, error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return nil, err
+		return digests{}, err
 	}
 	defer in.Close()
+	_ = unix.Fadvise(int(in.Fd()), 0, 0, unix.FADV_SEQUENTIAL)
 
 	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm()|0o600)
 	if err != nil {
-		return nil, err
+		return digests{}, err
 	}
 	ok := false
 	defer func() {
@@ -431,20 +466,33 @@ func copyFile(ctx context.Context, src, dst string, info fs.FileInfo, atime, mti
 			os.Remove(tmp)
 		}
 	}()
+	// Reserve the space up front: a copy that cannot possibly fit should fail
+	// before writing anything. Filesystems without fallocate are ignored.
+	if info.Size() > 0 {
+		if err := preallocate(out, info.Size()); err != nil {
+			return digests{}, fmt.Errorf("not enough space for %s: %w", dst, err)
+		}
+	}
 
-	h := sha256.New()
+	sh := newSampleHasher(info.Size())
+	writers := []io.Writer{out, sh}
+	var h hash.Hash
+	if knownSum == nil {
+		h = sha256.New()
+		writers = append(writers, h)
+	}
 	pb := getBuf()
 	defer putBuf(pb)
 	buf := *pb
-	w := io.MultiWriter(out, h)
+	w := io.MultiWriter(writers...)
 	for {
 		if err := wait(); err != nil {
-			return nil, err
+			return digests{}, err
 		}
 		n, rerr := in.Read(buf)
 		if n > 0 {
 			if _, err := w.Write(buf[:n]); err != nil {
-				return nil, err
+				return digests{}, err
 			}
 			onBytes(int64(n))
 		}
@@ -452,21 +500,32 @@ func copyFile(ctx context.Context, src, dst string, info fs.FileInfo, atime, mti
 			break
 		}
 		if rerr != nil {
-			return nil, rerr
+			return digests{}, rerr
 		}
 	}
+	// An import of many GB should not evict the desktop's working set.
+	_ = unix.Fadvise(int(in.Fd()), 0, 0, unix.FADV_DONTNEED)
 	if err := out.Sync(); err != nil {
-		return nil, err
+		return digests{}, err
 	}
+	// The pages are clean after the sync, so they can be dropped right away.
+	_ = unix.Fadvise(int(out.Fd()), 0, 0, unix.FADV_DONTNEED)
 	if err := out.Close(); err != nil {
-		return nil, err
+		return digests{}, err
 	}
 	if err := os.Chtimes(tmp, atime, mtime); err != nil {
-		return nil, err
+		return digests{}, err
+	}
+	if err := beforeRename(); err != nil {
+		return digests{}, err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
-		return nil, err
+		return digests{}, err
 	}
 	ok = true
-	return h.Sum(nil), nil
+	d := digests{sha: knownSum, sample: sh.sum()}
+	if h != nil {
+		d.sha = h.Sum(nil)
+	}
+	return d, nil
 }

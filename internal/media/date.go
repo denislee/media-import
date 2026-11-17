@@ -14,8 +14,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/rwcarlsen/goexif/exif"
 )
 
 // DateSource says where a capture time came from.
@@ -28,6 +26,9 @@ const (
 	SourceFilename DateSource = "filename"
 	SourceModTime  DateSource = "mtime"
 )
+
+// errMvhdUnset marks an mvhd atom that exists but carries creation time 0.
+var errMvhdUnset = errors.New("creation time not set")
 
 // minValid rejects obviously bogus timestamps (unset camera clocks, 1904 epochs).
 var minValid = time.Date(1980, 1, 2, 0, 0, 0, 0, time.UTC)
@@ -52,24 +53,35 @@ func FFprobeAvailable() bool {
 	return ffprobePath != ""
 }
 
-// CaptureTime determines the best guess for when a media file was taken,
-// trying embedded metadata first and falling back to the filename and
-// finally the file's modification time. The returned time is in local time.
+// CaptureTime determines the best guess for when a media file was taken.
+// Images and RAW files use embedded EXIF only; videos read the QuickTime mvhd
+// atom first and skip ffprobe when that atom exists but is unusable. ffprobe
+// (opt-in) covers the remaining videos and audio, then the filename, then the
+// file's modification time. The returned time is in local time.
 func CaptureTime(path string, kind Kind, fi os.FileInfo, opt DateOptions) (time.Time, DateSource) {
+	mvhdFound := false
 	switch kind {
 	case Image, Raw:
+		// Stills never run ffprobe: the native EXIF reader already covers
+		// JPEG/TIFF/RAW/HEIC/CR3/RAF and ffprobe rarely has dates for them.
 		if t, err := exifTime(path); err == nil && plausible(t) {
 			return t, SourceEXIF
 		}
 	case Video:
 		if isQuickTime(path) {
-			if t, err := quickTimeCreation(path); err == nil && plausible(t) {
+			t, err := quickTimeCreation(path)
+			if err == nil && plausible(t) {
 				return t.Local(), SourceVideo
+			}
+			if err == nil || errors.Is(err, errMvhdUnset) {
+				// The atom exists but is unusable; ffprobe reads the same
+				// atom, so asking it would only repeat this result.
+				mvhdFound = true
 			}
 		}
 	}
-	if opt.UseFFprobe && kind != Unknown && FFprobeAvailable() {
-		if t, err := ffprobeTime(path); err == nil && plausible(t) {
+	if opt.UseFFprobe && FFprobeAvailable() && (kind == Video && !mvhdFound || kind == Audio) {
+		if t, err := runFFprobe(path); err == nil && plausible(t) {
 			return t.Local(), SourceFFprobe
 		}
 	}
@@ -77,19 +89,6 @@ func CaptureTime(path string, kind Kind, fi os.FileInfo, opt DateOptions) (time.
 		return t, SourceFilename
 	}
 	return fi.ModTime(), SourceModTime
-}
-
-func exifTime(path string) (time.Time, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return time.Time{}, err
-	}
-	defer f.Close()
-	x, err := exif.Decode(f)
-	if err != nil && x == nil {
-		return time.Time{}, err
-	}
-	return x.DateTime() // DateTimeOriginal, falling back to DateTime
 }
 
 func isQuickTime(path string) bool {
@@ -158,7 +157,7 @@ func mvhdTime(r io.ReaderAt, start, end int64, depth int) (time.Time, error) {
 				secs = uint64(binary.BigEndian.Uint32(b[4:8]))
 			}
 			if secs == 0 {
-				return time.Time{}, errors.New("creation time not set")
+				return time.Time{}, errMvhdUnset
 			}
 			return macEpoch.Add(time.Duration(secs) * time.Second), nil
 		}
@@ -166,6 +165,9 @@ func mvhdTime(r io.ReaderAt, start, end int64, depth int) (time.Time, error) {
 	}
 	return time.Time{}, errors.New("mvhd atom not found")
 }
+
+// runFFprobe is ffprobeTime; tests replace it to count spawns.
+var runFFprobe = ffprobeTime
 
 func ffprobeTime(path string) (time.Time, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

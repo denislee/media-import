@@ -13,6 +13,9 @@ func TestResumeAfterInterruption(t *testing.T) {
 	jpath := filepath.Join(t.TempDir(), "journal")
 	o := baseOpts(src, dst)
 	o.Journal = jpath
+	// One worker: the two A.JPG sources must get A.jpg and A_1.jpg in walk
+	// order, since the test below assumes 100CANON's copy is A.jpg.
+	o.Workers = 1
 	if _, err := Run(context.Background(), o, nil, nil); err != nil {
 		t.Fatal(err)
 	}

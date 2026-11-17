@@ -19,9 +19,9 @@ wlroots compositors and runs without XWayland.
 - **All common media types**: JPEG/PNG/HEIC/WebP/AVIF…, RAW (CR2/CR3/NEF/ARW/DNG/ORF/RAF…),
   video (MP4/MOV/MKV/MTS/AVI…), audio (MP3/FLAC/WAV/M4A…). Each category can be toggled.
 - **Capture date detection**, in order:
-  1. EXIF `DateTimeOriginal` (JPEG and TIFF-based RAW)
+  1. EXIF `DateTimeOriginal` (JPEG, TIFF-based RAW, ORF/RW2, RAF, HEIC/AVIF, CR3), read with a few small header reads
   2. MP4/MOV/3GP `mvhd` creation time (read directly from the header)
-  3. `ffprobe` creation-time tags (optional; for MKV, AVI, HEIC and other formats)
+  3. `ffprobe` creation-time tags (optional; videos without a usable `mvhd`, such as MKV/AVI/MTS, and audio)
   4. A date in the filename (`IMG_20230514_183012`, `PXL_…`, `VID-20230514-WA…`, `2023-05-14 18.30.12`)
   5. The file's modification time
 - **Folder structure presets** (`YYYY/MM/DD`, `YYYY/YYYY-MM-DD`, `YYYY-MM-DD`, `YYYY/MM`,

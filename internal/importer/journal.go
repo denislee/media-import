@@ -2,12 +2,10 @@ package importer
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // The journal is an append-only, line-based record of an import so an
@@ -63,9 +61,14 @@ func ReadJournal(path string) (*ResumeState, error) {
 	return rs, sc.Err()
 }
 
+// syncFile fsyncs journal and index files; tests replace it to count calls.
+var syncFile = (*os.File).Sync
+
+// journal writes the resume journal with group commit (see groupFile). Only
+// B records must be durable at a specific point, before the copy is renamed
+// into place; resume treats a lost D or T record as "check again".
 type journal struct {
-	mu sync.Mutex
-	f  *os.File
+	g *groupFile
 }
 
 func openJournal(path string, appendTo bool) (*journal, error) {
@@ -83,26 +86,33 @@ func openJournal(path string, appendTo bool) (*journal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &journal{f: f}, nil
+	return &journal{g: newGroupFile(f)}, nil
 }
 
-// write appends one record and syncs it, so it survives a crash or power loss.
-func (j *journal) write(fields ...string) {
+// write appends one record (not yet synced) and returns its sequence number.
+func (j *journal) write(fields ...string) uint64 {
 	if j == nil {
-		return
+		return 0
 	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	fmt.Fprintln(j.f, strings.Join(fields, "\t"))
-	_ = j.f.Sync()
+	return j.g.append(strings.Join(fields, "\t"))
 }
 
-func (j *journal) begin(src, dst string) { j.write("B", strconv.Quote(src), strconv.Quote(dst)) }
-func (j *journal) done(src, dst string)  { j.write("D", strconv.Quote(src), strconv.Quote(dst)) }
+func (j *journal) begin(src, dst string) uint64 {
+	return j.write("B", strconv.Quote(src), strconv.Quote(dst))
+}
+func (j *journal) done(src, dst string) { j.write("D", strconv.Quote(src), strconv.Quote(dst)) }
+
+// syncTo makes record seq durable, sharing the fsync with concurrent callers.
+func (j *journal) syncTo(seq uint64) error {
+	if j == nil || seq == 0 {
+		return nil
+	}
+	return j.g.syncTo(seq)
+}
 
 func (j *journal) close() {
 	if j != nil {
-		j.f.Close()
+		_ = j.g.close()
 	}
 }
 

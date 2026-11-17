@@ -1,0 +1,5 @@
+//go:build !race
+
+package logbuf
+
+const raceEnabled = false
