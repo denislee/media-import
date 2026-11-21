@@ -46,7 +46,7 @@ func TestResumeAfterInterruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sum.Resumed != 2 || sum.Copied != 1 || sum.Failed != 0 || sum.Verified != 1 {
-		t.Fatalf("resume summary %+v %v", sum.Progress, sum.Errors)
+		t.Fatalf("resume summary %+v", sum.Progress)
 	}
 	if _, err := os.Stat(part); !os.IsNotExist(err) {
 		t.Error("leftover .part not removed")
@@ -131,4 +131,8 @@ func TestSameContent(t *testing.T) {
 	if ok, _ := sameContent(a, e, nop, func(int64) {}); ok {
 		t.Fatal("different length reported same")
 	}
+}
+
+func fileHash(p string) ([]byte, error) {
+	return hashFile(p, func() error { return nil }, func(int64) {}, false)
 }

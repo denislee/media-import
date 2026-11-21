@@ -60,7 +60,7 @@ func run(t testing.TB, o Options) Summary {
 	t.Helper()
 	sum, err := Run(context.Background(), o, nil, nil)
 	if err != nil || sum.Failed != 0 {
-		t.Fatalf("run: %v %+v %v", err, sum.Progress, sum.Errors)
+		t.Fatalf("run: %v %+v", err, sum.Progress)
 	}
 	return sum
 }

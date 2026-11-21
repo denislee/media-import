@@ -19,10 +19,9 @@ import (
 
 // ResumeState is what a previous, interrupted run left behind.
 type ResumeState struct {
-	Done       map[string]bool   // sources already handled
-	Pending    map[string]string // source → destination of transfers that may be incomplete
-	Total      int               // files found by the previous scan (0 if unknown)
-	TotalBytes int64
+	Done    map[string]bool   // sources already handled
+	Pending map[string]string // source → destination of transfers that may be incomplete
+	Total   int               // files found by the previous scan (0 if unknown)
 }
 
 // DoneCount is the number of files the previous run completed.
@@ -43,7 +42,6 @@ func ReadJournal(path string) (*ResumeState, error) {
 		switch {
 		case len(fields) == 3 && fields[0] == "T":
 			rs.Total, _ = strconv.Atoi(fields[1])
-			rs.TotalBytes, _ = strconv.ParseInt(fields[2], 10, 64)
 		case len(fields) == 3 && (fields[0] == "B" || fields[0] == "D"):
 			src, err1 := strconv.Unquote(fields[1])
 			dst, err2 := strconv.Unquote(fields[2])

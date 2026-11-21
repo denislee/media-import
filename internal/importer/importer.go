@@ -59,9 +59,7 @@ type Progress struct {
 	Failed     int
 	Bytes      int64
 	TotalBytes int64
-	Current    string
 	Elapsed    time.Duration
-	Workers    int
 	Paused     bool
 	Resumed    int            // files skipped because an earlier, interrupted run had finished them
 	Verified   int            // copies whose checksum was re-read from disk and matched
@@ -81,7 +79,6 @@ type Progress struct {
 type FileProgress struct {
 	Path  string
 	Dest  string
-	Kind  string
 	Stage string // "reading date", "preparing", "checking if already imported", "copying", "moving", "verifying", "removing source"…
 	Size  int64
 	Bytes int64
@@ -98,7 +95,7 @@ type slot struct {
 
 func (s *slot) begin(j job) {
 	s.mu.Lock()
-	s.fp = FileProgress{Path: j.src, Kind: j.kind.String(), Size: j.info.Size(), Stage: "reading date"}
+	s.fp = FileProgress{Path: j.src, Size: j.info.Size(), Stage: "reading date"}
 	s.active = true
 	s.mu.Unlock()
 	s.bytes.Store(0)
@@ -123,7 +120,6 @@ func (s *slot) end() {
 // Summary is the final result of a run.
 type Summary struct {
 	Progress
-	Errors []string
 }
 
 type job struct {
@@ -140,7 +136,7 @@ type runner struct {
 	found, done, copied, skipped, failed atomic.Int64
 	bytes, totalBytes                    atomic.Int64
 	total                                atomic.Int64
-	phase, current                       atomic.Value
+	phase                                atomic.Value
 	slots                                []slot
 	resumed, verified                    atomic.Int64
 	gate                                 *Gate
@@ -156,7 +152,6 @@ type runner struct {
 	mu       sync.Mutex
 	reserved map[string]resv
 	seen     map[string]int64 // destination paths known to exist → size (-1: not a regular file)
-	errs     []string
 }
 
 // Run executes an import. progress is called periodically (from another
@@ -189,7 +184,6 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 		defer r.idx.close()
 	}
 	r.phase.Store("scanning")
-	r.current.Store("")
 	start := time.Now()
 
 	stopTicker := make(chan struct{})
@@ -235,8 +229,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	<-tickerDone
 
 	r.phase.Store("done")
-	r.current.Store("")
-	s := Summary{Progress: r.snapshot(start), Errors: r.errs}
+	s := Summary{Progress: r.snapshot(start)}
 	if progress != nil {
 		progress(s.Progress)
 	}
@@ -303,9 +296,7 @@ func (r *runner) snapshot(start time.Time) Progress {
 		Failed:     int(r.failed.Load()),
 		Bytes:      r.bytes.Load(),
 		TotalBytes: r.totalBytes.Load(),
-		Current:    r.current.Load().(string),
 		Elapsed:    time.Since(start) - r.gate.pausedFor(),
-		Workers:    len(r.slots),
 		Paused:     r.gate.Paused(),
 		Resumed:    int(r.resumed.Load()),
 		Verified:   int(r.verified.Load()),
@@ -346,12 +337,9 @@ func (r *runner) kindCounts() map[string]int {
 	return m
 }
 
-func (r *runner) fail(format string, a ...any) {
-	msg := fmt.Sprintf(format, a...)
+func (r *runner) fail(src string, err error) {
+	msg := src + ": " + err.Error()
 	r.failed.Add(1)
-	r.mu.Lock()
-	r.errs = append(r.errs, msg)
-	r.mu.Unlock()
 	r.logf("ERROR " + msg)
 }
 
@@ -439,7 +427,6 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if ctx.Err() != nil {
 		return
 	}
-	r.current.Store(j.src)
 	sl.begin(j)
 	defer sl.end()
 	if rs := r.opt.Resume; rs != nil {
@@ -476,7 +463,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if err != nil {
 		if ctx.Err() == nil {
 			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load())) // count it as processed so the bar can reach 100%
-			r.fail("%s: %v", j.src, err)
+			r.fail(j.src, err)
 		}
 		return
 	}
@@ -493,7 +480,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		if err != nil {
 			if ctx.Err() == nil {
 				r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
-				r.fail("%s: %v", j.src, err)
+				r.fail(j.src, err)
 			}
 			return
 		}
@@ -528,14 +515,14 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if err != nil {
 		if ctx.Err() == nil {
 			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
-			r.fail("%s: %v", j.src, err)
+			r.fail(j.src, err)
 		}
 		return
 	}
 	written = true
 	r.jnl.done(j.src, dst)
 	if err := crashPoint("done"); err != nil {
-		r.fail("%s: %v", j.src, err)
+		r.fail(j.src, err)
 		return
 	}
 	r.copied.Add(1)
@@ -571,12 +558,11 @@ func (r *runner) skipDup(j job, sl *slot, dst string, how dupHow, d digests) {
 	switch how {
 	case dupQuick:
 		r.dupQuick.Add(1) // not recorded: the content was only sampled
-	case dupFull, dupOther:
-		if how == dupFull {
-			r.dupFull.Add(1)
-		} else {
-			r.dupOthr.Add(1)
-		}
+	case dupFull:
+		r.dupFull.Add(1)
+		r.record(j, dst, d)
+	case dupOther:
+		r.dupOthr.Add(1)
 		r.record(j, dst, d)
 	case dupIndexed:
 		r.dupIndexed.Add(1)
@@ -703,7 +689,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 		sl.set(stage, dst)
 		sl.bytes.Store(0)
 		var err error
-		d, err = copyFile(ctx, j.src, dst, j.info, atime, mtime, wait, func(n int64) {
+		d, err = copyFile(j.src, dst, j.info, atime, mtime, wait, func(n int64) {
 			r.bytes.Add(n)
 			sl.counted.Add(n)
 			sl.bytes.Add(n)

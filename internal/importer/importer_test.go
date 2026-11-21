@@ -67,7 +67,7 @@ func TestImportCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sum.Copied != 3 || sum.Failed != 0 || sum.Skipped != 0 {
-		t.Fatalf("summary %+v errs=%v", sum.Progress, sum.Errors)
+		t.Fatalf("summary %+v", sum.Progress)
 	}
 	a := exists(t, filepath.Join(dst, "2021/06/07/A.jpg"))
 	exists(t, filepath.Join(dst, "2021/06/07/A_1.jpg"))
@@ -122,7 +122,7 @@ func TestImportMoveAndMtimeCapture(t *testing.T) {
 	o.Move, o.MtimeCapture, o.NameTemplate = true, true, "{YYYY}{MM}{DD}_{name}"
 	sum, err := Run(context.Background(), o, nil, nil)
 	if err != nil || sum.Copied != 3 {
-		t.Fatalf("%v %+v %v", err, sum.Progress, sum.Errors)
+		t.Fatalf("%v %+v", err, sum.Progress)
 	}
 	fi := exists(t, filepath.Join(dst, "2020/01/02/20200102_IMG_20200102_030405.png"))
 	if want := time.Date(2020, 1, 2, 3, 4, 5, 0, time.Local); !fi.ModTime().Equal(want) {
@@ -201,8 +201,8 @@ func TestProgressDetails(t *testing.T) {
 	if n != sum.Copied || n == 0 {
 		t.Fatalf("ByKind %v does not add up to %d copied", sum.ByKind, sum.Copied)
 	}
-	if len(sum.Active) != 0 || sum.Workers == 0 {
-		t.Fatalf("active %v workers %d", sum.Active, sum.Workers)
+	if len(sum.Active) != 0 {
+		t.Fatalf("active %v", sum.Active)
 	}
 	if sum.Bytes != sum.TotalBytes {
 		t.Fatalf("bytes %d of %d", sum.Bytes, sum.TotalBytes)

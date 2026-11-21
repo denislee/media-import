@@ -199,7 +199,7 @@ func TestCrashMatrix(t *testing.T) {
 				o.Resume = rs
 				s, err := Run(context.Background(), o, nil, nil)
 				if err != nil || s.Failed != 0 || s.Copied+s.Resumed+s.Skipped != 4 {
-					t.Fatalf("resume: %v %+v %v", err, s.Progress, s.Errors)
+					t.Fatalf("resume: %v %+v", err, s.Progress)
 				}
 				if got := listDest(t, dst); strings.Join(got, ",") != strings.Join(want, ",") {
 					t.Fatalf("destination after resume:\n%v\nwant\n%v", got, want)

@@ -52,11 +52,6 @@ func (b *Buffer) Lines() []string {
 	return b.lines[i:len(b.lines):len(b.lines)]
 }
 
-// Len reports how many lines Lines would return, i.e. min(appended, max).
-func (b *Buffer) Len() int {
-	return len(b.Lines())
-}
-
 // Reset discards every kept line. Slices returned earlier by Lines are not
 // affected: they keep their contents because Reset only drops the buffer's
 // reference to the array.

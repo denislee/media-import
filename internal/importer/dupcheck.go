@@ -407,10 +407,6 @@ func hashReader(f io.Reader, wait func() error, onBytes func(int64)) ([]byte, er
 	}
 }
 
-func fileHash(p string) ([]byte, error) {
-	return hashFile(p, func() error { return nil }, func(int64) {}, false)
-}
-
 // verifyFile re-reads p from the disk (not the page cache) and compares its
 // SHA-256 with want.
 func verifyFile(p string, want []byte, wait func() error, onBytes func(int64)) (bool, error) {
@@ -446,7 +442,7 @@ func preallocate(f *os.File, size int64) error {
 // beforeRename runs just before the temporary file is renamed to dst; an
 // error from it aborts the copy. When knownSum (the source's SHA-256) is
 // given, the data is not hashed again and knownSum is returned.
-func copyFile(ctx context.Context, src, dst string, info fs.FileInfo, atime, mtime time.Time, wait func() error, onBytes func(int64), beforeRename func() error, knownSum []byte) (digests, error) {
+func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait func() error, onBytes func(int64), beforeRename func() error, knownSum []byte) (digests, error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return digests{}, err

@@ -15,7 +15,7 @@ func TestKeepsLastMax(t *testing.T) {
 	if got := b.Lines(); !slices.Equal(got, want) {
 		t.Fatalf("Lines() = %v, want %v", got, want)
 	}
-	if got := b.Len(); got != 5 {
+	if got := len(b.Lines()); got != 5 {
 		t.Fatalf("Len() = %d, want 5", got)
 	}
 }
@@ -43,7 +43,7 @@ func TestReset(t *testing.T) {
 	if got := b.Lines(); len(got) != 0 {
 		t.Fatalf("after Reset Lines() = %v, want empty", got)
 	}
-	if got := b.Len(); got != 0 {
+	if got := len(b.Lines()); got != 0 {
 		t.Fatalf("after Reset Len() = %d, want 0", got)
 	}
 	b.Append("c")
