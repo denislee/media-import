@@ -11,6 +11,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +77,41 @@ var bufPool = sync.Pool{New: func() any { b := make([]byte, bufSize); return &b 
 func getBuf() *[]byte  { return bufPool.Get().(*[]byte) }
 func putBuf(b *[]byte) { bufPool.Put(b) }
 
+// maxCollisions bounds the suffixes tried for one destination name.
+const maxCollisions = 10000
+
+// nameSlots remembers, for one destination dir+name, how far the suffix
+// sequence name, name_1, name_2, … is already known to be taken, so the k-th
+// same-named source does not walk k candidates. Guarded by runner.mu.
+type nameSlots struct {
+	next   int             // every suffix below next is in runner.seen
+	bySize map[int64][]int // suffixes below next, by seen size (regular files only)
+}
+
+// candName is the i-th candidate for base+ext in dir: name, name_1, name_2, …
+func candName(dir, base, ext string, i int) string {
+	if i == 0 {
+		return filepath.Join(dir, base+ext)
+	}
+	return filepath.Join(dir, base+"_"+strconv.Itoa(i)+ext)
+}
+
+// advance moves ns.next past suffixes that runner.seen already holds. r.mu
+// must be held. seen entries are never removed, so a suffix below next stays
+// taken for the rest of the run.
+func (r *runner) advance(ns *nameSlots, dir, base, ext string) {
+	for ns.next < maxCollisions {
+		sz, ok := r.seen[candName(dir, base, ext, ns.next)]
+		if !ok {
+			return
+		}
+		if sz >= 0 {
+			ns.bySize[sz] = append(ns.bySize[sz], ns.next)
+		}
+		ns.next++
+	}
+}
+
 // reserve picks a free destination path. If an identical file already exists
 // and SkipDups is set it returns that path and how it was recognised.
 //
@@ -82,6 +119,10 @@ func putBuf(b *[]byte) { bufPool.Put(b) }
 // stays in r.reserved: resvBusy until its transfer finishes, then resvWritten
 // (never deleted), so a stat that raced with another worker's rename is
 // detected and repeated.
+//
+// Suffixes below the name's nameSlots.next are skipped unless their seen size
+// equals the source's (only those can be duplicates), which is what the
+// per-candidate check below would decide for them anyway.
 func (r *runner) reserve(ctx context.Context, dir, name string, j job, expect [2]time.Time, sl *slot) (string, dupHow, error) {
 	ext := filepath.Ext(name)
 	base := strings.TrimSuffix(name, ext)
@@ -90,63 +131,87 @@ func (r *runner) reserve(ctx context.Context, dir, name string, j job, expect [2
 		srcSum   []byte
 		fullDone bool
 	)
-	for i := 0; i < 10000; i++ {
-		cand := filepath.Join(dir, name)
-		if i > 0 {
-			cand = filepath.Join(dir, fmt.Sprintf("%s_%d%s", base, i, ext))
-		}
-		r.mu.Lock()
-		before := r.reserved[cand]
-		known, seen := r.seen[cand]
-		r.mu.Unlock()
-		if before == resvBusy {
-			continue
-		}
-		// A path this run already found (or wrote) cannot be free, and can be
-		// a duplicate only if its size matches: skip the stat otherwise. This
-		// keeps many same-named sources at O(1) stats each instead of O(n).
-		if seen && (!r.opt.SkipDups || known != size) {
-			continue
-		}
-		st, err := statCand(cand)
-		if errors.Is(err, fs.ErrNotExist) {
+	key := filepath.Join(dir, name)
+	r.mu.Lock()
+	ns := r.names[key]
+	if ns == nil {
+		ns = &nameSlots{bySize: map[int64][]int{}}
+		r.names[key] = ns
+	}
+	r.advance(ns, dir, base, ext)
+	var known []int
+	if r.opt.SkipDups {
+		known = slices.Clone(ns.bySize[size])
+	}
+	start := ns.next
+	r.mu.Unlock()
+	// try examines suffix i; done reports that reserve has its answer.
+	try := func(i int) (cand string, how dupHow, done bool, err error) {
+		cand = candName(dir, base, ext, i)
+		for {
 			r.mu.Lock()
-			now := r.reserved[cand]
-			switch {
-			case now == resvBusy:
-				r.mu.Unlock()
-				continue
-			case now == resvWritten && before != resvWritten:
-				// Written by another worker after our stat: look again.
-				r.mu.Unlock()
-				i--
-				continue
-			}
-			r.reserved[cand] = resvBusy
+			before := r.reserved[cand]
+			seenSize, seen := r.seen[cand]
 			r.mu.Unlock()
-			return cand, notDup, nil
+			if before == resvBusy {
+				return "", notDup, false, nil
+			}
+			// A path this run already found (or wrote) cannot be free, and can be
+			// a duplicate only if its size matches: skip the stat otherwise. This
+			// keeps many same-named sources at O(1) stats each instead of O(n).
+			if seen && (!r.opt.SkipDups || seenSize != size) {
+				return "", notDup, false, nil
+			}
+			st, err := statCand(cand)
+			if errors.Is(err, fs.ErrNotExist) {
+				r.mu.Lock()
+				now := r.reserved[cand]
+				switch {
+				case now == resvBusy:
+					r.mu.Unlock()
+					return "", notDup, false, nil
+				case now == resvWritten && before != resvWritten:
+					// Written by another worker after our stat: look again.
+					r.mu.Unlock()
+					continue
+				}
+				r.reserved[cand] = resvBusy
+				r.mu.Unlock()
+				return cand, notDup, true, nil
+			}
+			if err != nil {
+				return "", notDup, true, err
+			}
+			r.mu.Lock()
+			if st.Mode().IsRegular() {
+				r.seen[cand] = st.Size()
+			} else {
+				r.seen[cand] = -1 // never a duplicate candidate
+			}
+			r.mu.Unlock()
+			if !r.opt.SkipDups || st.Size() != size || !st.Mode().IsRegular() {
+				return "", notDup, false, nil
+			}
+			how, err := r.checkCandidate(ctx, j, cand, st, expect, sl, &srcSum, &fullDone)
+			if err != nil {
+				return "", notDup, true, err
+			}
+			if how != notDup {
+				return cand, how, true, nil
+			}
+			sl.set("preparing", "")
+			return "", notDup, false, nil
 		}
-		if err != nil {
-			return "", notDup, err
+	}
+	for _, i := range known {
+		if cand, how, done, err := try(i); done {
+			return cand, how, err
 		}
-		r.mu.Lock()
-		if st.Mode().IsRegular() {
-			r.seen[cand] = st.Size()
-		} else {
-			r.seen[cand] = -1 // never a duplicate candidate
+	}
+	for i := start; i < maxCollisions; i++ {
+		if cand, how, done, err := try(i); done {
+			return cand, how, err
 		}
-		r.mu.Unlock()
-		if !r.opt.SkipDups || st.Size() != size || !st.Mode().IsRegular() {
-			continue
-		}
-		how, err := r.checkCandidate(ctx, j, cand, st, expect, sl, &srcSum, &fullDone)
-		if err != nil {
-			return "", notDup, err
-		}
-		if how != notDup {
-			return cand, how, nil
-		}
-		sl.set("preparing", "")
 	}
 	return "", notDup, errors.New("too many name collisions")
 }

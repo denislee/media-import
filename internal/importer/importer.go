@@ -151,7 +151,8 @@ type runner struct {
 
 	mu       sync.Mutex
 	reserved map[string]resv
-	seen     map[string]int64 // destination paths known to exist → size (-1: not a regular file)
+	seen     map[string]int64      // destination paths known to exist → size (-1: not a regular file)
+	names    map[string]*nameSlots // dir/name → suffixes known taken
 }
 
 // Run executes an import. progress is called periodically (from another
@@ -163,7 +164,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	if err := validate(&opt); err != nil {
 		return Summary{}, err
 	}
-	r := &runner{opt: opt, logf: logf, reserved: map[string]resv{}, seen: map[string]int64{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
+	r := &runner{opt: opt, logf: logf, reserved: map[string]resv{}, seen: map[string]int64{}, names: map[string]*nameSlots{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
 	if r.gate == nil {
 		r.gate = &Gate{}
 	}
