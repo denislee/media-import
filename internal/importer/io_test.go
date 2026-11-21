@@ -7,6 +7,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // preallocate must never fail on filesystems without fallocate support; only a
@@ -83,4 +86,70 @@ func TestLowSpaceWarning(t *testing.T) {
 		}
 	}
 	t.Fatalf("no low-space warning in %v", lines)
+}
+
+// stubFallocate replaces fallocate, counts the calls and returns ret from each.
+func stubFallocate(t *testing.T, ret error) *int {
+	t.Helper()
+	calls := 0
+	orig := fallocate
+	fallocate = func(fd int, mode uint32, off int64, n int64) error {
+		calls++
+		return ret
+	}
+	t.Cleanup(func() { fallocate = orig })
+	return &calls
+}
+
+// copyForTest copies a file of size zero bytes from src to dst, both inside
+// dir, and returns the copy's error.
+func copyForTest(t *testing.T, dir string, size int) error {
+	t.Helper()
+	src := filepath.Join(dir, "src.bin")
+	dst := filepath.Join(dir, "dst.bin")
+	if err := os.WriteFile(src, make([]byte, size), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = copyFile(src, dst, info, time.Now(), time.Now(), func() error { return nil }, func(int64) {}, func() error { return nil }, nil)
+	return err
+}
+
+// Small copies do not pay for an extra fallocate syscall.
+func TestNoPreallocateForSmallFiles(t *testing.T) {
+	calls := stubFallocate(t, nil)
+	if err := copyForTest(t, t.TempDir(), 4096); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("fallocate calls = %d, want 0", *calls)
+	}
+}
+
+// A large copy that cannot fit fails before writing, leaving no .part file.
+func TestPreallocateENOSPCFailsFast(t *testing.T) {
+	calls := stubFallocate(t, unix.ENOSPC)
+	dir := t.TempDir()
+	err := copyForTest(t, dir, 2<<20)
+	if *calls != 1 {
+		t.Fatalf("fallocate calls = %d, want 1", *calls)
+	}
+	if err == nil {
+		t.Fatal("copyFile succeeded, want an out-of-space error")
+	}
+	if !strings.Contains(err.Error(), "not enough space") {
+		t.Fatalf("error = %v, want it to mention not enough space", err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".part") {
+			t.Fatalf("temporary file %q left behind", e.Name())
+		}
+	}
 }

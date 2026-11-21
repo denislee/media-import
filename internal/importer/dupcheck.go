@@ -64,6 +64,7 @@ const (
 	sampleSize   = 64 << 10
 	mtimeSlack   = 2 * time.Second // FAT32 stores mtimes with 2 s resolution
 	bufSize      = 1 << 20
+	preallocMin  = 1 << 20 // smaller copies are not preallocated: their write fails as fast as fallocate would
 	stageCheck   = "checking if already imported"
 	stageQuick   = "checking if already imported (quick)"
 	stageOtherNm = "looking for copies under other names"
@@ -495,12 +496,15 @@ func verifyFile(p string, want []byte, wait func() error, onBytes func(int64)) (
 	return bytes.Equal(got, want), nil
 }
 
+// fallocate is unix.Fallocate; tests replace it to count calls and fake ENOSPC.
+var fallocate = unix.Fallocate
+
 // preallocate reserves size bytes for f, so a copy that cannot possibly fit
 // fails before it writes anything. Only a real "no space left" error is
 // returned: filesystems without fallocate support (EOPNOTSUPP and friends)
 // simply allocate as the data arrives.
 func preallocate(f *os.File, size int64) error {
-	err := unix.Fallocate(int(f.Fd()), unix.FALLOC_FL_KEEP_SIZE, 0, size) // keep the size: a short copy must not gain zero padding
+	err := fallocate(int(f.Fd()), unix.FALLOC_FL_KEEP_SIZE, 0, size) // keep the size: a short copy must not gain zero padding
 	if errors.Is(err, unix.ENOSPC) {
 		return err
 	}
@@ -532,9 +536,10 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 			os.Remove(tmp)
 		}
 	}()
-	// Reserve the space up front: a copy that cannot possibly fit should fail
-	// before writing anything. Filesystems without fallocate are ignored.
-	if info.Size() > 0 {
+	// Reserve space up front for large copies, so one that cannot possibly fit
+	// fails before writing anything. Small files skip the extra syscall;
+	// filesystems without fallocate are ignored.
+	if info.Size() >= preallocMin {
 		if err := preallocate(out, info.Size()); err != nil {
 			return digests{}, fmt.Errorf("not enough space for %s: %w", dst, err)
 		}
