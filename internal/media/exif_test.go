@@ -235,7 +235,7 @@ func TestNativeEXIFFormats(t *testing.T) {
 		{"cr3-cmt1-only", cr3File(tiffBlock(le, 42, dMod, "", false), tiffBlock(le, 42, "", "", false)), tMod, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := exifTimeAt(bytes.NewReader(tc.data), int64(len(tc.data)))
+			got, err := exifTimeAt(bytes.NewReader(tc.data), int64(len(tc.data)))
 			if err != nil || !got.Equal(tc.want) {
 				t.Fatalf("native: %v %v, want %v", got, err, tc.want)
 			}
@@ -263,7 +263,7 @@ func TestNativeEXIFNoDate(t *testing.T) {
 		{"heic-no-exif-item", bmffBox("ftyp", []byte("heic"), be32(0))},
 		{"empty", nil},
 	} {
-		if _, _, err := exifTimeAt(bytes.NewReader(tc.data), int64(len(tc.data))); err == nil {
+		if _, err := exifTimeAt(bytes.NewReader(tc.data), int64(len(tc.data))); err == nil {
 			t.Errorf("%s: expected an error", tc.name)
 		}
 	}
@@ -281,7 +281,7 @@ func TestNativeEXIFReadsLittle(t *testing.T) {
 	defer f.Close()
 	fi, _ := f.Stat()
 	c := &countingReaderAt{r: f}
-	got, _, err := exifTimeAt(c, fi.Size())
+	got, err := exifTimeAt(c, fi.Size())
 	if err != nil || !got.Equal(wantSynthetic) {
 		t.Fatal(got, err)
 	}

@@ -33,7 +33,7 @@ func TestDirIsContained(t *testing.T) {
 }
 
 // replacerExpand is the previous strings.NewReplacer implementation, kept as
-// the reference Expand must match exactly.
+// the reference expand must match exactly.
 func replacerExpand(tpl string, f Fields) string {
 	t := f.Time
 	r := strings.NewReplacer(
@@ -72,9 +72,9 @@ func TestExpandMatchesReplacer(t *testing.T) {
 	}
 	for _, ff := range fields {
 		for _, tpl := range tpls {
-			got, want := Expand(tpl, ff), replacerExpand(tpl, ff)
+			got, want := expand(tpl, ff), replacerExpand(tpl, ff)
 			if got != want {
-				t.Errorf("Expand(%q) = %q, want %q", tpl, got, want)
+				t.Errorf("expand(%q) = %q, want %q", tpl, got, want)
 			}
 		}
 	}

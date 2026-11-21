@@ -148,7 +148,7 @@ func listDest(t *testing.T, dst string) []string {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() && d.Name() == IndexDir {
+		if d.IsDir() && d.Name() == indexDir {
 			return fs.SkipDir
 		}
 		if !d.IsDir() {
@@ -189,7 +189,7 @@ func TestCrashMatrix(t *testing.T) {
 					t.Fatal("crashed run reported success")
 				}
 				d.powerLoss(t, jpath)
-				d.powerLoss(t, IndexPath(dst))
+				d.powerLoss(t, indexPath(dst))
 
 				rs, err := ReadJournal(jpath)
 				if err != nil {

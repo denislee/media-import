@@ -34,7 +34,7 @@ func writeStaleIndex(t *testing.T, dest string) string {
 	}
 	other := idxEntry{key: idxKey{"B.JPG", 3, 1}, rel: "b/B.jpg", dmtime: 1}
 	lines = append(lines, other.line())
-	p := IndexPath(dest)
+	p := indexPath(dest)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestIndexForgetsDeletedDest(t *testing.T) {
 	}
 	run(t, o) // copies both again, since their destinations are gone
 
-	data, err := os.ReadFile(IndexPath(dst))
+	data, err := os.ReadFile(indexPath(dst))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestIndexForgetsDeletedDest(t *testing.T) {
 	ro.close()
 
 	run(t, o)
-	if n := countLines(t, IndexPath(dst)); n > 6 {
+	if n := countLines(t, indexPath(dst)); n > 6 {
 		t.Fatalf("index has %d lines after compaction, want at most 6", n)
 	}
 }

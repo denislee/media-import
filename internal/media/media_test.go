@@ -36,9 +36,9 @@ func TestFilenameTime(t *testing.T) {
 		{"DSC_1234.JPG", time.Time{}, false},
 	}
 	for _, c := range cases {
-		got, ok := FilenameTime(c.name)
+		got, ok := filenameTime(c.name)
 		if ok != c.ok || (ok && !got.Equal(c.want)) {
-			t.Errorf("FilenameTime(%q) = %v,%v want %v,%v", c.name, got, ok, c.want, c.ok)
+			t.Errorf("filenameTime(%q) = %v,%v want %v,%v", c.name, got, ok, c.want, c.ok)
 		}
 	}
 }

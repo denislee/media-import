@@ -145,7 +145,7 @@ func TestDupAnyNameOldIndexHashesFully(t *testing.T) {
 	}
 
 	// Strip the sample field, leaving records older versions would write.
-	p := IndexPath(dst)
+	p := indexPath(dst)
 	raw, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestDupAnyNameStillFindsCopies(t *testing.T) {
 	}
 
 	// Hide the index's source keys so only the checksum lookup can match.
-	p := IndexPath(dst)
+	p := indexPath(dst)
 	idx, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)

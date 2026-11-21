@@ -86,7 +86,7 @@ func CaptureTime(path string, kind Kind, fi os.FileInfo, opt DateOptions) (time.
 			return t.Local(), SourceFFprobe
 		}
 	}
-	if t, ok := FilenameTime(filepath.Base(path)); ok {
+	if t, ok := filenameTime(filepath.Base(path)); ok {
 		return t, SourceFilename
 	}
 	return fi.ModTime(), SourceModTime
@@ -212,8 +212,8 @@ var filenameRe = regexp.MustCompile(
 	`(?:^|[^0-9])((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])` +
 		`(?:[-_ T.]?([01]\d|2[0-3])[-_.:h]?([0-5]\d)[-_.:m]?([0-5]\d))?`)
 
-// FilenameTime extracts a date (and optionally time) embedded in a filename.
-func FilenameTime(name string) (time.Time, bool) {
+// filenameTime extracts a date (and optionally time) embedded in a filename.
+func filenameTime(name string) (time.Time, bool) {
 	m := filenameRe.FindStringSubmatch(name)
 	if m == nil {
 		return time.Time{}, false

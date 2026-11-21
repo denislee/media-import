@@ -13,7 +13,7 @@ import (
 
 func BenchmarkIndexLoad100k(b *testing.B) {
 	dest := b.TempDir()
-	p := IndexPath(dest)
+	p := indexPath(dest)
 	os.MkdirAll(filepath.Dir(p), 0o755)
 	f, _ := os.Create(p)
 	w := bufio.NewWriter(f)

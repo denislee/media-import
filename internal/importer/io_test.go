@@ -94,7 +94,7 @@ func stubFallocate(t *testing.T, ret error) *int {
 	t.Helper()
 	calls := 0
 	orig := fallocate
-	fallocate = func(fd int, mode uint32, off int64, n int64) error {
+	fallocate = func(_ int, _ uint32, _ int64, _ int64) error {
 		calls++
 		return ret
 	}
@@ -164,7 +164,7 @@ func stubSyncFileRange(t *testing.T) *[]int64 {
 		offs []int64
 	)
 	orig := syncFileRange
-	syncFileRange = func(fd int, off int64, n int64, flags int) error {
+	syncFileRange = func(_ int, off int64, _ int64, _ int) error {
 		mu.Lock()
 		offs = append(offs, off)
 		mu.Unlock()

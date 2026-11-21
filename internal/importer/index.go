@@ -32,7 +32,7 @@ import (
 // every hit is confirmed against a fresh stat of the destination.
 
 const (
-	IndexDir  = ".media-import"
+	indexDir  = ".media-import"
 	indexFile = "index"
 )
 
@@ -58,15 +58,15 @@ type index struct {
 	bySize map[int64][]*idxEntry
 }
 
-// IndexPath returns the location of the destination index for dest.
-func IndexPath(dest string) string { return filepath.Join(dest, IndexDir, indexFile) }
+// indexPath returns the location of the destination index for dest.
+func indexPath(dest string) string { return filepath.Join(dest, indexDir, indexFile) }
 
 // openIndex loads dest's index. With readOnly the file is never created or
 // written (dry runs). A missing index is empty; an unreadable one is moved
 // aside and rebuilt from the copies this and later runs make.
 func openIndex(dest string, readOnly bool) (*index, error) {
 	ix := &index{dest: dest, byKey: map[idxKey][]*idxEntry{}, bySize: map[int64][]*idxEntry{}}
-	p := IndexPath(dest)
+	p := indexPath(dest)
 	lines, err := ix.load(p)
 	if err != nil && !os.IsNotExist(err) {
 		ix.byKey, ix.bySize = map[idxKey][]*idxEntry{}, map[int64][]*idxEntry{}

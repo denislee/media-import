@@ -176,7 +176,7 @@ func tickUntilDone(ctx context.Context, every time.Duration, changed func()) {
 	}
 }
 
-// UnmountedCache runs ListUnmounted (an lsblk fork) only when something it
+// UnmountedCache runs listUnmounted (an lsblk fork) only when something it
 // depends on changed: the set of block devices in /sys/class/block or the
 // mount table. Invalidate forces the next call to run it.
 type UnmountedCache struct {
@@ -195,7 +195,7 @@ type UnmountedCache struct {
 func (c *UnmountedCache) Get() []Unmounted {
 	sysBlock, mountinfo, list := c.sysBlock, c.mountinfo, c.list
 	if sysBlock == "" {
-		sysBlock, mountinfo, list = "/sys/class/block", "/proc/self/mountinfo", ListUnmounted
+		sysBlock, mountinfo, list = "/sys/class/block", "/proc/self/mountinfo", listUnmounted
 	}
 	var blocks []string
 	if ents, err := os.ReadDir(sysBlock); err == nil {

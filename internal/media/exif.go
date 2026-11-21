@@ -27,16 +27,6 @@ var (
 	errMalformed   = errors.New("malformed EXIF")
 )
 
-type exifFormat int
-
-const (
-	fmtNone exifFormat = iota
-	fmtJPEG
-	fmtTIFF
-	fmtRAF
-	fmtBMFF
-)
-
 const (
 	jpegScanLimit = 1 << 20 // stop walking JPEG segments past this offset
 	metaBoxLimit  = 4 << 20 // largest HEIF meta box read into memory
@@ -54,31 +44,26 @@ func exifTime(path string, size int64) (time.Time, error) {
 		return time.Time{}, err
 	}
 	defer f.Close()
-	t, _, err := exifTimeAt(f, size)
-	return t, err
+	return exifTimeAt(f, size)
 }
 
 // exifTimeAt sniffs the container format of r (size bytes) and reads its
 // EXIF capture date.
-func exifTimeAt(r io.ReaderAt, size int64) (time.Time, exifFormat, error) {
+func exifTimeAt(r io.ReaderAt, size int64) (time.Time, error) {
 	var hdr [16]byte
 	n, _ := r.ReadAt(hdr[:], 0)
 	h := hdr[:n]
 	switch {
 	case len(h) >= 3 && h[0] == 0xFF && h[1] == 0xD8 && h[2] == 0xFF:
-		t, err := jpegDate(r, size)
-		return t, fmtJPEG, err
+		return jpegDate(r, size)
 	case isTIFFHeader(h):
-		t, err := tiffDate(r, size)
-		return t, fmtTIFF, err
+		return tiffDate(r, size)
 	case bytes.HasPrefix(h, []byte("FUJIFILMCCD-RAW")):
-		t, err := rafDate(r, size)
-		return t, fmtRAF, err
+		return rafDate(r, size)
 	case len(h) >= 12 && string(h[4:8]) == "ftyp":
-		t, err := bmffDate(r, size)
-		return t, fmtBMFF, err
+		return bmffDate(r, size)
 	}
-	return time.Time{}, fmtNone, errNoContainer
+	return time.Time{}, errNoContainer
 }
 
 func tiffOrder(h []byte) binary.ByteOrder {

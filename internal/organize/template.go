@@ -47,8 +47,8 @@ type Fields struct {
 	Source string // name of the source volume / folder
 }
 
-// Expand substitutes tokens in tpl.
-func Expand(tpl string, f Fields) string {
+// expand substitutes tokens in tpl.
+func expand(tpl string, f Fields) string {
 	return string(appendExpand(make([]byte, 0, len(tpl)+32), tpl, f))
 }
 
@@ -56,7 +56,7 @@ func Expand(tpl string, f Fields) string {
 var tokens = [...]string{"{YYYY}", "{YY}", "{MMM}", "{MM}", "{DD}", "{hh}", "{mm}", "{ss}", "{kind}", "{ext}", "{name}", "{source}"}
 
 // appendExpand appends tpl with its tokens substituted to b. A single pass
-// keeps Expand allocation-light, and because the output is never rescanned a
+// keeps expand allocation-light, and because the output is never rescanned a
 // value that itself looks like a token is left alone.
 func appendExpand(b []byte, tpl string, f Fields) []byte {
 	t := f.Time
@@ -110,7 +110,7 @@ func appendExpand(b []byte, tpl string, f Fields) []byte {
 // Dir expands a directory template into a safe relative path. Any attempt
 // to escape the destination ("..", absolute paths) is neutralised.
 func Dir(tpl string, f Fields) string {
-	parts := strings.Split(Expand(tpl, f), "/")
+	parts := strings.Split(expand(tpl, f), "/")
 	clean := parts[:0]
 	for _, p := range parts {
 		p = sanitize(p)
@@ -127,7 +127,7 @@ func FileName(tpl string, f Fields, origExt string) string {
 	if strings.TrimSpace(tpl) == "" {
 		tpl = "{name}"
 	}
-	base := strings.ReplaceAll(Expand(tpl, f), "/", "_")
+	base := strings.ReplaceAll(expand(tpl, f), "/", "_")
 	base = sanitize(base)
 	if base == "" || base == "." || base == ".." {
 		base = f.Name

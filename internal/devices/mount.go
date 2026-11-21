@@ -40,9 +40,9 @@ type lsblkDev struct {
 	Children    []lsblkDev `json:"children"`
 }
 
-// ListUnmounted returns hot-pluggable/removable partitions (USB sticks, SD
+// listUnmounted returns hot-pluggable/removable partitions (USB sticks, SD
 // cards, cameras in mass-storage mode) that are not mounted yet.
-func ListUnmounted() []Unmounted {
+func listUnmounted() []Unmounted {
 	out, err := exec.Command("lsblk", "-J", "-b", "-o",
 		"NAME,PATH,LABEL,FSTYPE,MOUNTPOINTS,RM,HOTPLUG,TRAN,TYPE,SIZE").Output()
 	if err != nil {

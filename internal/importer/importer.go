@@ -361,7 +361,7 @@ func (r *runner) scan(ctx context.Context) ([]job, error) {
 			}
 			name := d.Name()
 			if d.IsDir() {
-				if p == r.opt.Dest || name == IndexDir || (p != src && !r.opt.IncludeHidden && strings.HasPrefix(name, ".")) {
+				if p == r.opt.Dest || name == indexDir || (p != src && !r.opt.IncludeHidden && strings.HasPrefix(name, ".")) {
 					return fs.SkipDir
 				}
 				return nil

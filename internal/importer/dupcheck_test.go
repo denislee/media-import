@@ -250,12 +250,12 @@ func TestIndexStaleEntries(t *testing.T) {
 func TestIndexCorruptIgnored(t *testing.T) {
 	src, dst := setup(t)
 	o := baseOpts(src, dst)
-	writeBytes(t, IndexPath(dst), []byte("garbage\nF\t\"x\"\t1\nF\t\"A.JPG\"\t3\t1\t\"../escape\"\t1\t-\nF\t\"A.JPG\"\t3\tzz\t\"a\"\t1\t-\n"), t1)
+	writeBytes(t, indexPath(dst), []byte("garbage\nF\t\"x\"\t1\nF\t\"A.JPG\"\t3\t1\t\"../escape\"\t1\t-\nF\t\"A.JPG\"\t3\tzz\t\"a\"\t1\t-\n"), t1)
 	if s := run(t, o); s.Copied != 3 {
 		t.Fatalf("%+v", s.Progress)
 	}
 	// Torn last line after the valid records.
-	f, _ := os.OpenFile(IndexPath(dst), os.O_APPEND|os.O_WRONLY, 0)
+	f, _ := os.OpenFile(indexPath(dst), os.O_APPEND|os.O_WRONLY, 0)
 	f.WriteString("F\t\"IMG")
 	f.Close()
 	if s := run(t, o); s.Skipped != 3 || s.DupIndexed != 3 {
@@ -282,8 +282,8 @@ func TestDuplicateUnderOtherName(t *testing.T) {
 	o.DirTemplate = "{YYYY}"
 	o.DupAnyName = true
 	// Hide the index's source keys so only the checksum lookup can match.
-	idx, _ := os.ReadFile(IndexPath(dst))
-	writeBytes(t, IndexPath(dst), []byte(strings.ReplaceAll(string(idx), "F\t\"", "F\t\"x")), t1)
+	idx, _ := os.ReadFile(indexPath(dst))
+	writeBytes(t, indexPath(dst), []byte(strings.ReplaceAll(string(idx), "F\t\"", "F\t\"x")), t1)
 	sum := run(t, o)
 	if sum.Skipped != 3 || sum.DupOtherName != 3 || sum.Copied != 0 {
 		t.Fatalf("%+v", sum.Progress)
@@ -298,7 +298,7 @@ func TestDuplicateUnderOtherName(t *testing.T) {
 
 func TestScanSkipsIndexDir(t *testing.T) {
 	src, dst := setup(t)
-	writeBytes(t, filepath.Join(src, IndexDir, "x.jpg"), []byte("x"), t1)
+	writeBytes(t, filepath.Join(src, indexDir, "x.jpg"), []byte("x"), t1)
 	o := baseOpts(src, dst)
 	o.IncludeHidden = true
 	if s := run(t, o); s.Total != 4 {
@@ -311,7 +311,7 @@ func TestDryRunDoesNotWriteIndex(t *testing.T) {
 	o := baseOpts(src, dst)
 	o.DryRun = true
 	run(t, o)
-	if _, err := os.Stat(IndexPath(dst)); !os.IsNotExist(err) {
+	if _, err := os.Stat(indexPath(dst)); !os.IsNotExist(err) {
 		t.Fatal("dry run wrote the index")
 	}
 }
