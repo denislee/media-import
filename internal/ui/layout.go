@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gioui.org/font"
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
@@ -277,6 +278,10 @@ func (s *state) tab(gtx layout.Context, key string, ic *widget.Icon, label strin
 func (s *state) banners(gtx layout.Context, running bool) layout.Dimensions {
 	s.mu.Lock()
 	busy, target, opErr := s.opBusy, s.authOp, s.opErr
+	focusPw := s.pwFocus && target != nil && !busy
+	if focusPw {
+		s.pwFocus = false
+	}
 	hasResume := s.resMeta != nil && s.resState != nil && !s.running
 	s.mu.Unlock()
 
@@ -300,7 +305,11 @@ func (s *state) banners(gtx layout.Context, running bool) layout.Dimensions {
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, gtx.Dp(360))
-						return s.editor(gtx, &s.pwEd, "Password")
+						d := s.editor(gtx, &s.pwEd, "Password")
+						if focusPw {
+							gtx.Execute(key.FocusCmd{Tag: &s.pwEd})
+						}
+						return d
 					}),
 					layout.Rigid(spacer(8, 0)),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {

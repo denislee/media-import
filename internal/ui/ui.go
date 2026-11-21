@@ -79,6 +79,7 @@ type state struct {
 	opErr       string
 	mountedPath string // set by the mount goroutine, applied to srcEd on the UI goroutine
 	pwEd        widget.Editor
+	pwFocus     bool // focus pwEd on the next frame the prompt is shown
 	pwOK        widget.Clickable
 	pwCancel    widget.Clickable
 
@@ -269,9 +270,9 @@ func (s *state) runOp(op privOp, password string) {
 		case err == nil:
 			s.authOp = nil
 		case errors.Is(err, devices.ErrPasswordRequired):
-			s.authOp = &op
+			s.authOp, s.pwFocus = &op, true
 		case errors.Is(err, devices.ErrBadPassword):
-			s.authOp, s.opErr = &op, "Incorrect password, try again."
+			s.authOp, s.opErr, s.pwFocus = &op, "Incorrect password, try again.", true
 		default:
 			s.authOp, s.opErr = nil, err.Error()
 		}
