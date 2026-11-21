@@ -61,13 +61,14 @@ const (
 )
 
 const (
-	sampleSize   = 64 << 10
-	mtimeSlack   = 2 * time.Second // FAT32 stores mtimes with 2 s resolution
-	bufSize      = 1 << 20
-	preallocMin  = 1 << 20 // smaller copies are not preallocated: their write fails as fast as fallocate would
-	stageCheck   = "checking if already imported"
-	stageQuick   = "checking if already imported (quick)"
-	stageOtherNm = "looking for copies under other names"
+	sampleSize     = 64 << 10
+	mtimeSlack     = 2 * time.Second // FAT32 stores mtimes with 2 s resolution
+	bufSize        = 1 << 20
+	preallocMin    = 1 << 20 // smaller copies are not preallocated: their write fails as fast as fallocate would
+	writebackEvery = 8 << 20 // start writeback of a large copy every this many bytes
+	stageCheck     = "checking if already imported"
+	stageQuick     = "checking if already imported (quick)"
+	stageOtherNm   = "looking for copies under other names"
 )
 
 // statCand is os.Stat for reserve; tests replace it to count probes.
@@ -499,6 +500,9 @@ func verifyFile(p string, want []byte, wait func() error, onBytes func(int64)) (
 // fallocate is unix.Fallocate; tests replace it to count calls and fake ENOSPC.
 var fallocate = unix.Fallocate
 
+// syncFileRange is unix.SyncFileRange; tests replace it to count calls.
+var syncFileRange = unix.SyncFileRange
+
 // preallocate reserves size bytes for f, so a copy that cannot possibly fit
 // fails before it writes anything. Only a real "no space left" error is
 // returned: filesystems without fallocate support (EOPNOTSUPP and friends)
@@ -511,8 +515,9 @@ func preallocate(f *os.File, size int64) error {
 	return nil
 }
 
-// copyFile copies src to dst via a temporary file, fsyncs it, restores the
-// permissions and timestamps, and returns the SHA-256 of the data written.
+// copyFile copies src to dst via a temporary file, starting writeback as a
+// large copy goes, fsyncs it, restores the permissions and timestamps, and
+// returns the SHA-256 of the data written.
 // beforeRename runs just before the temporary file is renamed to dst; an
 // error from it aborts the copy. When knownSum (the source's SHA-256) is
 // given, the data is not hashed again and knownSum is returned.
@@ -556,6 +561,7 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 	defer putBuf(pb)
 	buf := *pb
 	w := io.MultiWriter(writers...)
+	var written, flushed int64
 	for {
 		if err := wait(); err != nil {
 			return digests{}, err
@@ -566,6 +572,14 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 				return digests{}, err
 			}
 			onBytes(int64(n))
+			written += int64(n)
+			if written-flushed >= writebackEvery {
+				// Start writing this range back now, so the final fsync waits for
+				// little more than the tail. It only starts I/O: durability still
+				// comes from the Sync below, and errors are left for it to report.
+				_ = syncFileRange(int(out.Fd()), flushed, written-flushed, unix.SYNC_FILE_RANGE_WRITE)
+				flushed = written
+			}
 		}
 		if rerr == io.EOF {
 			break

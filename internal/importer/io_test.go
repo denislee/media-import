@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -151,5 +152,43 @@ func TestPreallocateENOSPCFailsFast(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".part") {
 			t.Fatalf("temporary file %q left behind", e.Name())
 		}
+	}
+}
+
+// stubSyncFileRange replaces syncFileRange, records the offset of each call and
+// returns nil; the recorded offsets can be read once the copy has finished.
+func stubSyncFileRange(t *testing.T) *[]int64 {
+	t.Helper()
+	var (
+		mu   sync.Mutex
+		offs []int64
+	)
+	orig := syncFileRange
+	syncFileRange = func(fd int, off int64, n int64, flags int) error {
+		mu.Lock()
+		offs = append(offs, off)
+		mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { syncFileRange = orig })
+	return &offs
+}
+
+// A large copy starts writeback every writebackEvery bytes; a small one never
+// starts any.
+func TestWritebackDuringLargeCopy(t *testing.T) {
+	offs := stubSyncFileRange(t)
+	stubFallocate(t, nil)
+	if err := copyForTest(t, t.TempDir(), 20<<20); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	if want := []int64{0, 8 << 20}; !slices.Equal(*offs, want) {
+		t.Fatalf("sync_file_range offsets = %v, want %v", *offs, want)
+	}
+	if err := copyForTest(t, t.TempDir(), 4096); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	if want := []int64{0, 8 << 20}; !slices.Equal(*offs, want) {
+		t.Fatalf("sync_file_range offsets after small copy = %v, want %v", *offs, want)
 	}
 }
