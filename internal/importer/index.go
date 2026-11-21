@@ -119,6 +119,12 @@ func (ix *index) load(p string) (int, error) {
 	return lines, sc.Err()
 }
 
+// validRel reports whether rel is a usable index path: relative and inside
+// the destination. "..foo.jpg" is a legitimate name, "../x" is not.
+func validRel(rel string) bool {
+	return rel != "" && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 // parseRemovalLine parses an X record; malformed lines are rejected.
 func parseRemovalLine(line string) (idxKey, string, bool) {
 	f := strings.Split(line, "\t")
@@ -129,7 +135,7 @@ func parseRemovalLine(line string) (idxKey, string, bool) {
 	size, err2 := strconv.ParseInt(f[2], 10, 64)
 	smt, err3 := strconv.ParseInt(f[3], 10, 64)
 	rel, err4 := strconv.Unquote(f[4])
-	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || rel == "" || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || !validRel(rel) {
 		return idxKey{}, "", false
 	}
 	return idxKey{name, size, smt}, rel, true
@@ -152,7 +158,7 @@ func parseIndexLine(line string) (*idxEntry, bool) {
 	smt, err3 := strconv.ParseInt(f[3], 10, 64)
 	rel, err4 := strconv.Unquote(f[4])
 	dmt, err5 := strconv.ParseInt(f[5], 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || rel == "" || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || !validRel(rel) {
 		return nil, false
 	}
 	e := &idxEntry{key: idxKey{name, size, smt}, rel: rel, dmtime: dmt}
@@ -249,7 +255,7 @@ func (ix *index) add(k idxKey, dst string, dmtime time.Time, d digests) error {
 		return nil
 	}
 	rel, err := filepath.Rel(ix.dest, dst)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || !validRel(rel) {
 		return nil
 	}
 	e := &idxEntry{key: k, rel: rel, dmtime: dmtime.UnixNano(), sha: d.sha, sample: d.sample}

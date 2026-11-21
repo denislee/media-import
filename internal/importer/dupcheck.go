@@ -226,8 +226,9 @@ func mtimeNear(m time.Time, expect [2]time.Time) bool {
 	return false
 }
 
-// sampledSame compares the first, middle and last sampleSize bytes of a and
-// b (both size bytes long). It returns the number of bytes read.
+// sampledSame compares the blocks sampleRanges(size) names (the same ones the
+// index's sample digest covers) in a and b (both size bytes long). It returns
+// the number of bytes read.
 func sampledSame(a, b string, size int64) (bool, int64, error) {
 	fa, err := os.Open(a)
 	if err != nil {
@@ -242,21 +243,25 @@ func sampledSame(a, b string, size int64) (bool, int64, error) {
 	pa, pb := getBuf(), getBuf()
 	defer putBuf(pa)
 	defer putBuf(pb)
-	ba, bb := (*pa)[:sampleSize], (*pb)[:sampleSize]
 	var read int64
-	for _, off := range [...]int64{0, size/2 - sampleSize/2, size - sampleSize} {
-		na, err := fa.ReadAt(ba, off)
-		read += int64(na)
-		if err != nil && !(errors.Is(err, io.EOF) && na == sampleSize) {
-			return false, read, err
-		}
-		nb, err := fb.ReadAt(bb, off)
-		read += int64(nb)
-		if err != nil && !(errors.Is(err, io.EOF) && nb == sampleSize) {
-			return false, read, err
-		}
-		if !bytes.Equal(ba, bb) {
-			return false, read, nil
+	for _, rg := range sampleRanges(size) {
+		for off := rg[0]; off < rg[1]; {
+			n := min(int64(len(*pa)), rg[1]-off)
+			ba, bb := (*pa)[:n], (*pb)[:n]
+			na, err := fa.ReadAt(ba, off)
+			read += int64(na)
+			if err != nil && !(errors.Is(err, io.EOF) && int64(na) == n) {
+				return false, read, err
+			}
+			nb, err := fb.ReadAt(bb, off)
+			read += int64(nb)
+			if err != nil && !(errors.Is(err, io.EOF) && int64(nb) == n) {
+				return false, read, err
+			}
+			if !bytes.Equal(ba, bb) {
+				return false, read, nil
+			}
+			off += n
 		}
 	}
 	return true, read, nil

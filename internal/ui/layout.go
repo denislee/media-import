@@ -538,7 +538,7 @@ func (s *state) deviceItems() []devItem {
 	}
 	for i, u := range s.unmounted {
 		items = append(items, devItem{clk: &s.mountBtns[i], ic: icUSB, title: u.Name(),
-			sub: fmt.Sprintf("Not mounted · %s · %s", u.FS, humanBytes(u.Size)), trailing: "Mount", busy: busy})
+			sub: fmt.Sprintf("Not mounted · %s · %s", u.FS, importer.HumanSize(u.Size)), trailing: "Mount", busy: busy})
 	}
 	return items
 }
@@ -1002,11 +1002,11 @@ func (s *state) progressSummary(gtx layout.Context, p importer.Progress, running
 	var label string
 	switch {
 	case scanning:
-		label = fmt.Sprintf("%d media files found · %s", p.Found, humanBytes(p.TotalBytes))
+		label = fmt.Sprintf("%d media files found · %s", p.Found, importer.HumanSize(p.TotalBytes))
 	case p.Total == 0 && p.Phase == "done":
 		label = "No media files found"
 	default:
-		label = fmt.Sprintf("%d%%  ·  %s of %s", percent(p), humanBytes(p.Bytes), humanBytes(p.TotalBytes))
+		label = fmt.Sprintf("%d%%  ·  %s of %s", percent(p), importer.HumanSize(p.Bytes), importer.HumanSize(p.TotalBytes))
 	}
 
 	avg := float64(p.Bytes) / max(p.Elapsed.Seconds(), 0.001)
@@ -1036,15 +1036,15 @@ func (s *state) progressSummary(gtx layout.Context, p importer.Progress, running
 		stats = append(stats, st{"Done earlier", strconv.Itoa(p.Resumed), s.pal.muted})
 	}
 	if scanning {
-		stats = []st{{"Found", strconv.Itoa(p.Found), fg}, {"Size", humanBytes(p.TotalBytes), fg}}
+		stats = []st{{"Found", strconv.Itoa(p.Found), fg}, {"Size", importer.HumanSize(p.TotalBytes), fg}}
 	} else {
 		switch {
 		case running && p.Paused:
 			stats = append(stats, st{"Speed", "paused", s.pal.warn})
 		case running:
-			stats = append(stats, st{"Speed", humanBytes(int64(speed)) + "/s", fg})
+			stats = append(stats, st{"Speed", importer.HumanSize(int64(speed)) + "/s", fg})
 		}
-		stats = append(stats, st{"Average", humanBytes(int64(avg)) + "/s", fg})
+		stats = append(stats, st{"Average", importer.HumanSize(int64(avg)) + "/s", fg})
 	}
 	stats = append(stats, st{"Elapsed", fmtDur(p.Elapsed), fg})
 	if running && !scanning {
@@ -1143,7 +1143,7 @@ func (s *state) activeRow(gtx layout.Context, fp importer.FileProgress, dest str
 				}),
 				layout.Rigid(spacer(10, 0)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					l := material.Caption(s.th, fmt.Sprintf("%s  ·  %s / %s", fp.Stage, humanBytes(fp.Bytes), humanBytes(fp.Size)))
+					l := material.Caption(s.th, fmt.Sprintf("%s  ·  %s / %s", fp.Stage, importer.HumanSize(fp.Bytes), importer.HumanSize(fp.Size)))
 					l.Color, l.MaxLines = s.pal.muted, 1
 					return l.Layout(gtx)
 				}),

@@ -495,7 +495,7 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 			s.win.Invalidate()
 		}, s.appendLog)
 		msg := fmt.Sprintf("%s finished: %d imported, %d skipped, %d failed, %s in %s",
-			mode, sum.Copied, sum.Skipped, sum.Failed, humanBytes(sum.Bytes), sum.Elapsed.Round(time.Second))
+			mode, sum.Copied, sum.Skipped, sum.Failed, importer.HumanSize(sum.Bytes), sum.Elapsed.Round(time.Second))
 		switch {
 		case ctx.Err() != nil:
 			msg = fmt.Sprintf("Cancelled after %d of %d files", sum.Done, sum.Total)
@@ -546,7 +546,7 @@ func dupSummary(p importer.Progress) string {
 		return ""
 	}
 	return fmt.Sprintf("Duplicates: %s; %s read in %s", strings.Join(parts, ", "),
-		humanBytes(p.DupCheckBytes), p.DupCheckTime.Round(10*time.Millisecond))
+		importer.HumanSize(p.DupCheckBytes), p.DupCheckTime.Round(10*time.Millisecond))
 }
 
 // activitySummary says what the workers are doing, e.g.
@@ -613,19 +613,6 @@ func expandHome(p string) string {
 		}
 	}
 	return p
-}
-
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func notify(msg string) {

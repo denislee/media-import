@@ -119,3 +119,24 @@ func TestIndexForgetsDeletedDest(t *testing.T) {
 		t.Fatalf("index has %d lines after compaction, want at most 6", n)
 	}
 }
+
+// An index path is usable when it is relative and inside the destination:
+// "..foo.jpg" is a legitimate name, "../x" escapes.
+func TestValidRel(t *testing.T) {
+	for _, c := range []struct {
+		rel  string
+		want bool
+	}{
+		{"..foo.jpg", true},
+		{"a/..b", true},
+		{"a/b.jpg", true},
+		{"..", false},
+		{"../x", false},
+		{"/abs", false},
+		{"", false},
+	} {
+		if got := validRel(c.rel); got != c.want {
+			t.Errorf("validRel(%q) = %v, want %v", c.rel, got, c.want)
+		}
+	}
+}

@@ -327,6 +327,19 @@ func TestSampledSame(t *testing.T) {
 	}
 }
 
+func TestSampledSameMiddleDiffers(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	d := blob(4*sampleSize+17, 9)
+	d2 := bytes.Clone(d)
+	d2[len(d)/2] ^= 0xff
+	writeBytes(t, a, d, t1)
+	writeBytes(t, b, d2, t1)
+	if ok, _, err := sampledSame(a, b, int64(len(d))); ok || err != nil {
+		t.Fatal(ok, err)
+	}
+}
+
 // BenchmarkReimport measures re-importing a card whose files are all in the
 // destination already, per duplicate-check method. Run with
 //

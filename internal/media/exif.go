@@ -8,8 +8,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/rwcarlsen/goexif/exif"
 )
 
 // A small EXIF reader that finds the capture date with a handful of ReadAt
@@ -44,37 +42,20 @@ const (
 	metaBoxLimit  = 4 << 20 // largest HEIF meta box read into memory
 	maxIFDEntries = 1024    // sanity bound for one IFD
 	maxASCII      = 64      // longest date string read
-	goexifLimit   = 1 << 20 // bytes the goexif fallback may read
 	exifLayout    = "2006:01:02 15:04:05"
 	exifLayoutAlt = "2006-01-02 15:04:05"
 )
 
-// exifTime returns DateTimeOriginal (falling back to DateTime) from path.
-func exifTime(path string) (time.Time, error) {
+// exifTime returns DateTimeOriginal (falling back to DateTime) of the size-byte
+// file at path, using the native reader only.
+func exifTime(path string, size int64) (time.Time, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return time.Time{}, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return time.Time{}, err
-	}
-	t, format, err := exifTimeAt(f, fi.Size())
-	if err == nil || (format != fmtJPEG && format != fmtTIFF) {
-		return t, err
-	}
-	// JPEG/TIFF magic but no date found: let goexif try, on a bounded prefix
-	// so it can never read (and buffer) a whole RAW file.
-	return goexifTime(io.NewSectionReader(f, 0, min(fi.Size(), goexifLimit)))
-}
-
-func goexifTime(r io.Reader) (time.Time, error) {
-	x, err := exif.Decode(r)
-	if err != nil && x == nil {
-		return time.Time{}, err
-	}
-	return x.DateTime()
+	t, _, err := exifTimeAt(f, size)
+	return t, err
 }
 
 // exifTimeAt sniffs the container format of r (size bytes) and reads its

@@ -33,8 +33,8 @@ func TestHumanSize(t *testing.T) {
 		{1536, "1.5 KiB"},
 		{3 << 30, "3.0 GiB"},
 	} {
-		if got := humanSize(c.n); got != c.want {
-			t.Errorf("humanSize(%d) = %q, want %q", c.n, got, c.want)
+		if got := HumanSize(c.n); got != c.want {
+			t.Errorf("HumanSize(%d) = %q, want %q", c.n, got, c.want)
 		}
 	}
 }

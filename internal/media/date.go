@@ -54,22 +54,23 @@ func FFprobeAvailable() bool {
 }
 
 // CaptureTime determines the best guess for when a media file was taken.
-// Images and RAW files use embedded EXIF only; videos read the QuickTime mvhd
-// atom first and skip ffprobe when that atom exists but is unusable. ffprobe
-// (opt-in) covers the remaining videos and audio, then the filename, then the
-// file's modification time. The returned time is in local time.
+// Images and RAW files use embedded EXIF only; videos and QuickTime-family
+// audio (m4a) read the mvhd atom first and skip ffprobe when that atom exists
+// but is unusable. ffprobe (opt-in) covers the remaining videos and audio,
+// then the filename, then the file's modification time. The returned time is
+// in local time.
 func CaptureTime(path string, kind Kind, fi os.FileInfo, opt DateOptions) (time.Time, DateSource) {
 	mvhdFound := false
 	switch kind {
 	case Image, Raw:
 		// Stills never run ffprobe: the native EXIF reader already covers
 		// JPEG/TIFF/RAW/HEIC/CR3/RAF and ffprobe rarely has dates for them.
-		if t, err := exifTime(path); err == nil && plausible(t) {
+		if t, err := exifTime(path, fi.Size()); err == nil && plausible(t) {
 			return t, SourceEXIF
 		}
-	case Video:
+	case Video, Audio:
 		if isQuickTime(path) {
-			t, err := quickTimeCreation(path)
+			t, err := quickTimeCreation(path, fi.Size())
 			if err == nil && plausible(t) {
 				return t.Local(), SourceVideo
 			}
@@ -80,7 +81,7 @@ func CaptureTime(path string, kind Kind, fi os.FileInfo, opt DateOptions) (time.
 			}
 		}
 	}
-	if opt.UseFFprobe && FFprobeAvailable() && (kind == Video && !mvhdFound || kind == Audio) {
+	if opt.UseFFprobe && FFprobeAvailable() && (kind == Video || kind == Audio) && !mvhdFound {
 		if t, err := runFFprobe(path); err == nil && plausible(t) {
 			return t.Local(), SourceFFprobe
 		}
@@ -104,66 +105,58 @@ var macEpoch = time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // quickTimeCreation reads the creation time from the moov/mvhd atom of an
 // ISO-BMFF (MP4/MOV/3GP) file without reading the media payload.
-func quickTimeCreation(path string) (time.Time, error) {
+func quickTimeCreation(path string, size int64) (time.Time, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return time.Time{}, err
 	}
 	defer f.Close()
-	fi, err := f.Stat()
+	return mvhdTime(f, size)
+}
+
+func mvhdTime(r io.ReaderAt, size int64) (time.Time, error) {
+	moov, ok, err := findBox(r, 0, size, "moov")
 	if err != nil {
 		return time.Time{}, err
 	}
-	return mvhdTime(f, 0, fi.Size(), 0)
+	if !ok {
+		return time.Time{}, errors.New("mvhd atom not found")
+	}
+	mvhd, ok, err := findBox(r, moov.start, moov.end, "mvhd")
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !ok {
+		return time.Time{}, errors.New("mvhd atom not found")
+	}
+	var b [20]byte
+	if _, err := r.ReadAt(b[:], mvhd.start); err != nil {
+		return time.Time{}, err
+	}
+	var secs uint64
+	if b[0] == 1 { // version 1: 64-bit times
+		secs = binary.BigEndian.Uint64(b[4:12])
+	} else {
+		secs = uint64(binary.BigEndian.Uint32(b[4:8]))
+	}
+	if secs == 0 {
+		return time.Time{}, errMvhdUnset
+	}
+	return macEpoch.Add(time.Duration(secs) * time.Second), nil
 }
 
-func mvhdTime(r io.ReaderAt, start, end int64, depth int) (time.Time, error) {
-	if depth > 4 {
-		return time.Time{}, errors.New("atom nesting too deep")
-	}
-	var hdr [16]byte
-	for off := start; off+8 <= end; {
-		if _, err := r.ReadAt(hdr[:8], off); err != nil {
-			return time.Time{}, err
+// findBox returns the first box of type typ in [start, end).
+func findBox(r io.ReaderAt, start, end int64, typ string) (box, bool, error) {
+	var found box
+	ok := false
+	err := walkBoxes(r, start, end, func(b box) bool {
+		if b.typ == typ {
+			found, ok = b, true
+			return false
 		}
-		size := int64(binary.BigEndian.Uint32(hdr[:4]))
-		typ := string(hdr[4:8])
-		hlen := int64(8)
-		switch size {
-		case 1: // 64-bit size follows
-			if _, err := r.ReadAt(hdr[8:16], off+8); err != nil {
-				return time.Time{}, err
-			}
-			size = int64(binary.BigEndian.Uint64(hdr[8:16]))
-			hlen = 16
-		case 0: // extends to end of file
-			size = end - off
-		}
-		if size < hlen || off+size > end {
-			return time.Time{}, errors.New("malformed atom")
-		}
-		switch typ {
-		case "moov":
-			return mvhdTime(r, off+hlen, off+size, depth+1)
-		case "mvhd":
-			var b [20]byte
-			if _, err := r.ReadAt(b[:], off+hlen); err != nil {
-				return time.Time{}, err
-			}
-			var secs uint64
-			if b[0] == 1 { // version 1: 64-bit times
-				secs = binary.BigEndian.Uint64(b[4:12])
-			} else {
-				secs = uint64(binary.BigEndian.Uint32(b[4:8]))
-			}
-			if secs == 0 {
-				return time.Time{}, errMvhdUnset
-			}
-			return macEpoch.Add(time.Duration(secs) * time.Second), nil
-		}
-		off += size
-	}
-	return time.Time{}, errors.New("mvhd atom not found")
+		return true
+	})
+	return found, ok, err
 }
 
 // runFFprobe is ffprobeTime; tests replace it to count spawns.

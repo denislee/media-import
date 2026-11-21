@@ -220,7 +220,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 				}
 			}
 			if free, ok := freeBytesFn(opt.Dest); ok && need > free {
-				logf(fmt.Sprintf("WARN destination has %s free but up to %s may be copied (duplicates are skipped, so it may still fit)", humanSize(free), humanSize(need)))
+				logf(fmt.Sprintf("WARN destination has %s free but up to %s may be copied (duplicates are skipped, so it may still fit)", HumanSize(free), HumanSize(need)))
 			}
 		}
 		err = r.process(ctx, jobs)
@@ -811,8 +811,8 @@ func freeBytes(dir string) (int64, bool) {
 	return int64(st.Bavail) * int64(st.Bsize), true
 }
 
-// humanSize formats n with 1024-based units: "512 B", "1.5 KiB", "3.0 GiB".
-func humanSize(n int64) string {
+// HumanSize formats n with 1024-based units: "512 B", "1.5 KiB", "3.0 GiB".
+func HumanSize(n int64) string {
 	if n < 1024 {
 		return fmt.Sprintf("%d B", n)
 	}

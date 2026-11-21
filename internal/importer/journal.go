@@ -121,7 +121,7 @@ func (r *ResumeState) Rebase(oldRoot, newRoot string) {
 		return
 	}
 	move := func(p string) string {
-		if rel, err := filepath.Rel(oldRoot, p); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(oldRoot, p); err == nil && validRel(rel) {
 			return filepath.Join(newRoot, rel)
 		}
 		return p
