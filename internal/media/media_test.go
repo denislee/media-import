@@ -69,11 +69,14 @@ func TestQuickTimeCreation(t *testing.T) {
 	when := time.Date(2022, 8, 9, 10, 11, 12, 0, time.UTC)
 	p := filepath.Join(t.TempDir(), "clip.mp4")
 	writeTestMP4(t, p, when)
-	got, err := quickTimeCreation(p)
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := quickTimeCreation(p, fi.Size())
 	if err != nil || !got.Equal(when) {
 		t.Fatalf("got %v, %v; want %v", got, err, when)
 	}
-	fi, _ := os.Stat(p)
 	ct, src := CaptureTime(p, Video, fi, DateOptions{})
 	if src != SourceVideo || !ct.Equal(when) {
 		t.Fatalf("CaptureTime = %v (%s)", ct, src)

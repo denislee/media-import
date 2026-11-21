@@ -118,3 +118,37 @@ func TestNoFFprobeWhenMvhdUnset(t *testing.T) {
 		t.Errorf("got %v (%s), want source %s", got, src, SourceModTime)
 	}
 }
+
+func TestM4AUsesMvhdNotFFprobe(t *testing.T) {
+	calls := countFFprobe(t)
+	dir := t.TempDir()
+
+	when := time.Date(2022, 8, 9, 10, 11, 12, 0, time.UTC)
+	p := filepath.Join(dir, "memo.m4a")
+	writeTestMP4(t, p, when)
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, src := CaptureTime(p, Classify(p), fi, DateOptions{UseFFprobe: true})
+	if n := calls.Load(); n != 0 {
+		t.Errorf("ffprobe called %d times for m4a, want 0", n)
+	}
+	if src != SourceVideo {
+		t.Errorf("source = %s, want %s", src, SourceVideo)
+	}
+	if !got.Equal(when) {
+		t.Errorf("got %v, want %v", got, when)
+	}
+
+	p = filepath.Join(dir, "song.mp3")
+	writeZeroFile(t, p)
+	fi, err = os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	CaptureTime(p, Classify(p), fi, DateOptions{UseFFprobe: true})
+	if n := calls.Load(); n != 1 {
+		t.Errorf("ffprobe called %d times for mp3, want 1", n)
+	}
+}

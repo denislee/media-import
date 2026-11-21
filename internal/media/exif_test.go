@@ -6,10 +6,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rwcarlsen/goexif/exif"
 )
+
+func goexifTime(r io.Reader) (time.Time, error) {
+	x, err := exif.Decode(r)
+	if err != nil && x == nil {
+		return time.Time{}, err
+	}
+	return x.DateTime()
+}
 
 // tiffBlock builds a TIFF structure: IFD0 with DateTime (and, if exifIFD,
 // a pointer to an Exif IFD holding DateTimeOriginal; otherwise
@@ -279,7 +291,7 @@ func TestNativeEXIFReadsLittle(t *testing.T) {
 	allocs := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			_, _ = exifTime(p)
+			_, _ = exifTime(p, fi.Size())
 		}
 	}).AllocedBytesPerOp()
 	if allocs > 1<<20 {
@@ -303,8 +315,12 @@ func TestGoldenAgainstGoexif(t *testing.T) {
 			return nil
 		}
 		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			return nil
+		}
 		want, werr := goexifTime(f)
-		got, gerr := exifTime(p)
+		got, gerr := exifTime(p, fi.Size())
 		n++
 		switch {
 		case werr == nil && (gerr != nil || !got.Equal(want)):
@@ -315,4 +331,54 @@ func TestGoldenAgainstGoexif(t *testing.T) {
 		return nil
 	})
 	t.Logf("%d files compared", n)
+}
+
+// rchar returns the process's total bytes read via read(2), from /proc/self/io.
+func rchar(t *testing.T) int64 {
+	t.Helper()
+	data, err := os.ReadFile("/proc/self/io")
+	if err != nil {
+		t.Skipf("/proc/self/io not readable: %v", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "rchar:") {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "rchar:")), 10, 64)
+		if err != nil {
+			t.Skipf("cannot parse %q: %v", line, err)
+		}
+		return n
+	}
+	t.Skip("/proc/self/io has no rchar line")
+	return 0
+}
+
+// A JPEG with no EXIF and a multi-megabyte scan must not be read to the end:
+// the segment walk stops at the start of scan.
+func TestEXIFLessJPEGReadsLittle(t *testing.T) {
+	var b bytes.Buffer
+	b.Write([]byte{0xFF, 0xD8})
+	b.Write(jpegSeg(0xE0, append([]byte("JFIF\x00"), make([]byte, 9)...))) // APP0, length 16
+	b.Write(jpegSeg(0xDB, make([]byte, 65)))                               // DQT, length 67
+	b.Write(jpegSeg(0xDA, make([]byte, 6)))                                // SOS, length 8
+	b.Write(make([]byte, 3<<20))                                           // scan data
+	b.Write([]byte{0xFF, 0xD9})                                            // EOI
+	p := filepath.Join(t.TempDir(), "nodate.jpg")
+	if err := os.WriteFile(p, b.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := rchar(t)
+	if _, err := exifTime(p, fi.Size()); err == nil {
+		t.Fatal("expected no EXIF date")
+	}
+	delta := rchar(t) - before
+	if delta >= 8<<10 {
+		t.Errorf("read %d bytes, want < %d", delta, 8<<10)
+	}
 }
