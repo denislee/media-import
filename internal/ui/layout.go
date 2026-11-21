@@ -93,17 +93,7 @@ func (s *state) update(gtx layout.Context) bool {
 		s.mu.Unlock()
 	}
 	if s.pauseBtn.Clicked(gtx) {
-		s.mu.Lock()
-		if g := s.gate; g != nil {
-			if g.Paused() {
-				g.Resume()
-				s.addLog("Resumed")
-			} else {
-				g.Pause()
-				s.addLog("Paused")
-			}
-		}
-		s.mu.Unlock()
+		s.togglePause()
 	}
 	if s.resumeBtn.Clicked(gtx) && !running {
 		s.resume()
@@ -927,7 +917,7 @@ func (s *state) dupOptions(gtx layout.Context) layout.Dimensions {
 			})
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return s.optionRow(gtx, &s.dupAnyName, "Also match other names", "Finds copies saved under a different name (reads same-size files)")
+			return s.optionRow(gtx, &s.dupAnyName, "Also match other names", "Finds copies saved under a different name (compares sampled blocks, then checksums)")
 		}),
 	)
 }

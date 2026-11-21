@@ -350,6 +350,24 @@ func (s *state) appendLog(line string) {
 	s.mu.Unlock()
 }
 
+// togglePause pauses or resumes the running import. It must not hold s.mu
+// while logging: addLog takes s.mu itself.
+func (s *state) togglePause() {
+	s.mu.Lock()
+	g := s.gate
+	s.mu.Unlock()
+	if g == nil {
+		return
+	}
+	if g.Paused() {
+		g.Resume()
+		s.addLog("Resumed")
+	} else {
+		g.Pause()
+		s.addLog("Paused")
+	}
+}
+
 func (s *state) start() {
 	cfg := s.settings()
 	if err := saveSettings(cfg); err != nil {
