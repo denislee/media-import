@@ -370,7 +370,9 @@ func (s *state) bar(gtx layout.Context, h unit.Dp, frac float32, fg color.NRGBA,
 		st := clip.Rect{Min: image.Pt(max(0, x), 0), Max: image.Pt(min(size.X, x+seg), size.Y)}.Push(gtx.Ops)
 		paint.Fill(gtx.Ops, fg)
 		st.Pop()
-		gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(16 * time.Millisecond)})
+		// 30 fps is smooth enough for a moving segment; each frame re-lays
+		// out the whole window.
+		gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(33 * time.Millisecond)})
 	} else if w := int(float32(size.X) * max(0, min(1, frac))); w > 0 {
 		st := clip.Rect{Max: image.Pt(w, size.Y)}.Push(gtx.Ops)
 		paint.Fill(gtx.Ops, fg)
