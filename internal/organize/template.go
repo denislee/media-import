@@ -49,22 +49,62 @@ type Fields struct {
 
 // Expand substitutes tokens in tpl.
 func Expand(tpl string, f Fields) string {
+	return string(appendExpand(make([]byte, 0, len(tpl)+32), tpl, f))
+}
+
+// tokens are tried in this order at each '{', so {MMM} wins over {MM}.
+var tokens = [...]string{"{YYYY}", "{YY}", "{MMM}", "{MM}", "{DD}", "{hh}", "{mm}", "{ss}", "{kind}", "{ext}", "{name}", "{source}"}
+
+// appendExpand appends tpl with its tokens substituted to b. A single pass
+// keeps Expand allocation-light, and because the output is never rescanned a
+// value that itself looks like a token is left alone.
+func appendExpand(b []byte, tpl string, f Fields) []byte {
 	t := f.Time
-	r := strings.NewReplacer(
-		"{YYYY}", t.Format("2006"),
-		"{YY}", t.Format("06"),
-		"{MMM}", t.Format("Jan"),
-		"{MM}", t.Format("01"),
-		"{DD}", t.Format("02"),
-		"{hh}", t.Format("15"),
-		"{mm}", t.Format("04"),
-		"{ss}", t.Format("05"),
-		"{kind}", f.Kind,
-		"{ext}", f.Ext,
-		"{name}", f.Name,
-		"{source}", f.Source,
-	)
-	return r.Replace(tpl)
+	for i := 0; i < len(tpl); {
+		if tpl[i] == '{' {
+			matched := false
+			for _, tok := range tokens {
+				if !strings.HasPrefix(tpl[i:], tok) {
+					continue
+				}
+				switch tok {
+				case "{YYYY}":
+					b = t.AppendFormat(b, "2006")
+				case "{YY}":
+					b = t.AppendFormat(b, "06")
+				case "{MMM}":
+					b = t.AppendFormat(b, "Jan")
+				case "{MM}":
+					b = t.AppendFormat(b, "01")
+				case "{DD}":
+					b = t.AppendFormat(b, "02")
+				case "{hh}":
+					b = t.AppendFormat(b, "15")
+				case "{mm}":
+					b = t.AppendFormat(b, "04")
+				case "{ss}":
+					b = t.AppendFormat(b, "05")
+				case "{kind}":
+					b = append(b, f.Kind...)
+				case "{ext}":
+					b = append(b, f.Ext...)
+				case "{name}":
+					b = append(b, f.Name...)
+				case "{source}":
+					b = append(b, f.Source...)
+				}
+				i += len(tok)
+				matched = true
+				break
+			}
+			if matched {
+				continue
+			}
+		}
+		b = append(b, tpl[i])
+		i++
+	}
+	return b
 }
 
 // Dir expands a directory template into a safe relative path. Any attempt

@@ -149,8 +149,25 @@ func removalLine(k idxKey, rel string) string {
 
 // parseIndexLine parses one record; malformed or torn lines are rejected.
 func parseIndexLine(line string) (*idxEntry, bool) {
-	f := strings.Split(line, "\t")
-	if (len(f) != 7 && len(f) != 8) || f[0] != "F" {
+	// Split into at most 8 fields without allocating: a record never has more.
+	var f [8]string
+	n := 0
+	rest := line
+	more := false
+	for n < len(f) {
+		var field string
+		field, rest, more = strings.Cut(rest, "\t")
+		f[n] = field
+		n++
+		if !more {
+			break
+		}
+	}
+	if more {
+		// The eighth cut still found a separator: more than 8 fields.
+		return nil, false
+	}
+	if (n != 7 && n != 8) || f[0] != "F" {
 		return nil, false
 	}
 	name, err1 := strconv.Unquote(f[1])
@@ -161,20 +178,32 @@ func parseIndexLine(line string) (*idxEntry, bool) {
 	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil || !validRel(rel) {
 		return nil, false
 	}
+	// Copy name and rel into one fresh string: as substrings of line they
+	// would keep the whole line (digests included) alive as long as the entry.
+	s := name + rel
+	name, rel = s[:len(name)], s[len(name):]
 	e := &idxEntry{key: idxKey{name, size, smt}, rel: rel, dmtime: dmt}
-	if f[6] != "-" {
-		sha, err := hex.DecodeString(f[6])
-		if err != nil || len(sha) != 32 {
-			return nil, false
-		}
-		e.sha = sha
+	// Both digests share one allocation, made only if a digest is present.
+	var d []byte
+	if f[6] != "-" || n == 8 {
+		d = make([]byte, 64)
 	}
-	if len(f) == 8 {
-		sample, err := hex.DecodeString(f[7])
-		if err != nil || len(sample) != 32 {
+	decode := func(dst []byte, h string) bool {
+		if len(h) != 2*len(dst) { // checked first: Decode would write past dst
+			return false
+		}
+		k, err := hex.Decode(dst, []byte(h))
+		return err == nil && k == len(dst)
+	}
+	if f[6] != "-" {
+		if e.sha = d[:32:32]; !decode(e.sha, f[6]) {
 			return nil, false
 		}
-		e.sample = sample
+	}
+	if n == 8 {
+		if e.sample = d[32:64:64]; !decode(e.sample, f[7]) {
+			return nil, false
+		}
 	}
 	return e, true
 }

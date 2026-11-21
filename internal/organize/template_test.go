@@ -1,6 +1,7 @@
 package organize
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,6 +29,72 @@ func TestDirIsContained(t *testing.T) {
 	}
 	if got := Dir("a//b/./c", f); got != "a/b/c" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// replacerExpand is the previous strings.NewReplacer implementation, kept as
+// the reference Expand must match exactly.
+func replacerExpand(tpl string, f Fields) string {
+	t := f.Time
+	r := strings.NewReplacer(
+		"{YYYY}", t.Format("2006"),
+		"{YY}", t.Format("06"),
+		"{MMM}", t.Format("Jan"),
+		"{MM}", t.Format("01"),
+		"{DD}", t.Format("02"),
+		"{hh}", t.Format("15"),
+		"{mm}", t.Format("04"),
+		"{ss}", t.Format("05"),
+		"{kind}", f.Kind,
+		"{ext}", f.Ext,
+		"{name}", f.Name,
+		"{source}", f.Source,
+	)
+	return r.Replace(tpl)
+}
+
+func TestExpandMatchesReplacer(t *testing.T) {
+	var tpls []string
+	for _, p := range DirPresets {
+		tpls = append(tpls, p.Template)
+	}
+	for _, p := range NamePresets {
+		tpls = append(tpls, p.Template)
+	}
+	tpls = append(tpls,
+		"{MMM}{MM}{M}", "{{YYYY}}", "{", "}{", "{name",
+		"a{kind}/{source}_{ext}", "",
+	)
+	fields := []Fields{
+		f,
+		// A value that looks like a token must not be expanded twice.
+		{Time: f.Time, Kind: f.Kind, Name: "{YYYY}", Ext: f.Ext, Source: f.Source},
+	}
+	for _, ff := range fields {
+		for _, tpl := range tpls {
+			got, want := Expand(tpl, ff), replacerExpand(tpl, ff)
+			if got != want {
+				t.Errorf("Expand(%q) = %q, want %q", tpl, got, want)
+			}
+		}
+	}
+}
+
+func TestDirAndNameAllocs(t *testing.T) {
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = Dir("{YYYY}/{MM}/{DD}", f)
+		_ = FileName("{YYYY}{MM}{DD}_{hh}{mm}{ss}_{name}", f, ".jpg")
+	})
+	if allocs > 10 {
+		t.Errorf("Dir+FileName allocate %v times per run, want <= 10", allocs)
+	}
+}
+
+func BenchmarkDirAndName(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		Dir("{YYYY}/{MM}/{DD}", f)
+		FileName("{name}", f, ".jpg")
 	}
 }
 
