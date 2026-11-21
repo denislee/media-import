@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -24,18 +25,57 @@ import (
 //
 // gvfs mounts (phones, cameras) are FUSE directories that neither source
 // announces, so changed is also called every fallback interval.
+//
+// Both sleep without a timeout of their own; an eventfd signalled when ctx is
+// done wakes them.
 func Watch(ctx context.Context, fallback time.Duration, changed func(block bool)) {
+	stop, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		stop = -1
+	}
+	var unregister func() bool
+	if stop >= 0 {
+		unregister = context.AfterFunc(ctx, func() {
+			var one [8]byte
+			one[0] = 1
+			unix.Write(stop, one[:])
+		})
+	}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); watchMounts(ctx, fallback, func() { changed(false) }) }()
-	go func() { defer wg.Done(); watchUevents(ctx, func() { changed(true) }) }()
+	go func() { defer wg.Done(); watchMounts(ctx, stop, fallback, func() { changed(false) }) }()
+	go func() { defer wg.Done(); watchUevents(ctx, stop, func() { changed(true) }) }()
 	wg.Wait()
+	if stop >= 0 {
+		unregister()
+		unix.Close(stop)
+	}
 }
 
-// pollSlice bounds each blocking poll so ctx cancellation is noticed.
-const pollSlice = time.Second
+// pollCalls counts unix.Poll calls by the watchers, so tests can check that an
+// idle watcher sleeps instead of waking up periodically.
+var pollCalls atomic.Int64
 
-func watchMounts(ctx context.Context, fallback time.Duration, changed func()) {
+func poll(fds []unix.PollFd, timeoutMs int) (int, error) {
+	pollCalls.Add(1)
+	return unix.Poll(fds, timeoutMs)
+}
+
+// pollTimeout is the poll timeout in ms: until the deadline d (-1: none) when
+// stop is usable, otherwise at most a second so ctx is still noticed.
+func pollTimeout(stop int, d time.Duration) int {
+	if stop < 0 {
+		if d < 0 || d > time.Second {
+			d = time.Second
+		}
+	}
+	if d < 0 {
+		return -1
+	}
+	return int((d + time.Millisecond - 1) / time.Millisecond)
+}
+
+func watchMounts(ctx context.Context, stop int, fallback time.Duration, changed func()) {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		tickUntilDone(ctx, fallback, changed)
@@ -43,12 +83,17 @@ func watchMounts(ctx context.Context, fallback time.Duration, changed func()) {
 	}
 	defer f.Close()
 	fds := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLPRI}}
+	if stop >= 0 {
+		fds = append(fds, unix.PollFd{Fd: int32(stop), Events: unix.POLLIN})
+	}
 	last := time.Now()
 	for ctx.Err() == nil {
-		n, err := unix.Poll(fds, int(pollSlice/time.Millisecond))
+		n, err := poll(fds, pollTimeout(stop, max(0, fallback-time.Since(last))))
 		switch {
 		case err != nil && err != unix.EINTR:
 			tickUntilDone(ctx, fallback, changed)
+			return
+		case stop >= 0 && n > 0 && fds[len(fds)-1].Revents != 0:
 			return
 		case n > 0 && fds[0].Revents&(unix.POLLPRI|unix.POLLERR) != 0:
 			last = time.Now()
@@ -60,7 +105,7 @@ func watchMounts(ctx context.Context, fallback time.Duration, changed func()) {
 	}
 }
 
-func watchUevents(ctx context.Context, changed func()) {
+func watchUevents(ctx context.Context, stop int, changed func()) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.NETLINK_KOBJECT_UEVENT)
 	if err != nil {
 		return // the mountinfo watcher and its fallback still run
@@ -71,6 +116,9 @@ func watchUevents(ctx context.Context, changed func()) {
 	}
 	buf := make([]byte, 16<<10)
 	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	if stop >= 0 {
+		fds = append(fds, unix.PollFd{Fd: int32(stop), Events: unix.POLLIN})
+	}
 	var later *time.Timer
 	defer func() {
 		if later != nil {
@@ -78,11 +126,14 @@ func watchUevents(ctx context.Context, changed func()) {
 		}
 	}()
 	for ctx.Err() == nil {
-		n, err := unix.Poll(fds, int(pollSlice/time.Millisecond))
+		n, err := poll(fds, pollTimeout(stop, -1))
 		if err != nil && err != unix.EINTR {
 			return
 		}
-		if n <= 0 {
+		if stop >= 0 && n > 0 && fds[len(fds)-1].Revents != 0 {
+			return
+		}
+		if n <= 0 || fds[0].Revents == 0 {
 			continue
 		}
 		m, _, err := unix.Recvfrom(fd, buf, unix.MSG_DONTWAIT)

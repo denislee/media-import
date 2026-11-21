@@ -93,11 +93,50 @@ func TestWatchStopsOnCancel(t *testing.T) {
 		Watch(ctx, time.Hour, func(bool) {})
 		close(done)
 	}()
+	time.Sleep(100 * time.Millisecond)
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Watch did not return")
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Watch did not return promptly after cancel")
+	}
+}
+
+func TestWatchIdleDoesNotWake(t *testing.T) {
+	before := pollCalls.Load()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		Watch(ctx, time.Hour, func(bool) {})
+		close(done)
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	n := pollCalls.Load() - before
+	cancel()
+	<-done
+	if n > 3 {
+		t.Errorf("%d polls in 1.5 s while idle, want at most 3 (one per watcher, plus a stray uevent)", n)
+	}
+}
+
+func TestPollTimeout(t *testing.T) {
+	tests := []struct {
+		stop int
+		d    time.Duration
+		want int
+	}{
+		{3, -1, -1},
+		{3, 0, 0},
+		{3, 1500 * time.Millisecond, 1500},
+		{3, 1500*time.Millisecond + 1, 1501},
+		{-1, -1, 1000},
+		{-1, 5 * time.Second, 1000},
+		{-1, 200 * time.Millisecond, 200},
+	}
+	for _, tt := range tests {
+		if got := pollTimeout(tt.stop, tt.d); got != tt.want {
+			t.Errorf("pollTimeout(%d, %v) = %d, want %d", tt.stop, tt.d, got, tt.want)
+		}
 	}
 }
 
