@@ -276,12 +276,13 @@ func (s *state) runOp(op privOp, password string) {
 		default:
 			s.authOp, s.opErr = nil, err.Error()
 		}
+		failed := err != nil && s.authOp == nil // read under mu: the UI goroutine writes authOp
 		s.mu.Unlock()
 		if err == nil {
 			op.done(res)
 			s.unm.Invalidate()
 			s.refreshVolumes()
-		} else if s.authOp == nil {
+		} else if failed {
 			s.addLog(op.verb + " failed: " + err.Error())
 		}
 		s.win.Invalidate()
