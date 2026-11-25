@@ -11,7 +11,7 @@ import (
 // The journal is an append-only, line-based record of an import so an
 // interrupted run can be resumed:
 //
-//	T <files> <bytes>   scan finished
+//	T <files> <bytes>   scan finished (bytes is informational: ReadJournal does not read it)
 //	B <src> <dst>       transfer to dst started
 //	D <src> <dst>       src fully handled (copied, moved or duplicate)
 //

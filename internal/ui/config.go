@@ -62,6 +62,42 @@ func loadSettings() settings {
 	return s
 }
 
+// writeFileAtomic writes b to p by way of p.tmp and a rename. A crash mid-write
+// leaves the old file (or none), never a truncated one; a leftover p.tmp is
+// ignored by the loaders.
+func writeFileAtomic(p string, b []byte) error {
+	tmp := p + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// instanceLock takes the per-user lock that keeps a second window from sharing
+// (and wiping) the resume journal and resume.json.
+func instanceLock(dir string) (*os.File, error) {
+	return importer.LockFile(filepath.Join(dir, "lock"))
+}
+
 func saveSettings(s settings) error {
 	p := configPath()
 	if p == "" {
@@ -74,7 +110,7 @@ func saveSettings(s settings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	return writeFileAtomic(p, b)
 }
 
 // resumeMeta describes an import that can be resumed. It is written when an
@@ -112,7 +148,7 @@ func saveResumeMeta(m resumeMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(resumePath(), b, 0o644)
+	return writeFileAtomic(resumePath(), b)
 }
 
 // loadResume returns the interrupted import, if any.
@@ -135,4 +171,15 @@ func loadResume() (*resumeMeta, *importer.ResumeState) {
 func clearResume() {
 	os.Remove(resumePath())
 	os.Remove(journalPath())
+}
+
+// discardResume forgets the interrupted import rs describes and removes the
+// temporary files its in-flight copies left in the destination (best effort).
+func discardResume(rs *importer.ResumeState) {
+	if rs != nil {
+		for _, dst := range rs.Pending {
+			_ = os.Remove(importer.PartPath(dst))
+		}
+	}
+	clearResume()
 }

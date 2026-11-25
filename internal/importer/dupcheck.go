@@ -231,6 +231,18 @@ func (r *runner) release(p string, written bool, size int64) {
 	r.mu.Unlock()
 }
 
+// taken records that p exists although this run did not write it, so reserve
+// moves past it (and, with SkipDups, checks it as a duplicate candidate).
+func (r *runner) taken(p string) {
+	sz := int64(-1)
+	if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+		sz = st.Size()
+	}
+	r.mu.Lock()
+	r.seen[p] = sz
+	r.mu.Unlock()
+}
+
 // ensureDir creates dir, once per run. It is called only when a file is
 // about to be written there, so duplicates never create empty folders.
 func (r *runner) ensureDir(dir string) error {
@@ -534,7 +546,7 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 	defer in.Close()
 	_ = unix.Fadvise(int(in.Fd()), 0, 0, unix.FADV_SEQUENTIAL)
 
-	tmp := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
+	tmp := PartPath(dst)
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm()|0o600)
 	if err != nil {
 		return digests{}, err
@@ -599,6 +611,15 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 			return digests{}, rerr
 		}
 	}
+	// A source still being written (a camera finishing a video, a sync tool)
+	// has more data than was read: do not install, or later move, a short copy.
+	st, err := in.Stat()
+	if err != nil {
+		return digests{}, err
+	}
+	if written != info.Size() || !sameStat(st, info) {
+		return digests{}, errSourceChanged
+	}
 	// An import of many GB should not evict the desktop's working set.
 	_ = unix.Fadvise(int(in.Fd()), 0, 0, unix.FADV_DONTNEED)
 	if err := out.Sync(); err != nil {
@@ -615,7 +636,7 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 	if err := beforeRename(); err != nil {
 		return digests{}, err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
+	if err := renameNoReplace(tmp, dst); err != nil {
 		return digests{}, err
 	}
 	ok = true
@@ -626,7 +647,8 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 	switch {
 	case sh != nil:
 		d.sample = sh.sum()
-	case written == info.Size(): // as sh.sum, nil if the file changed while read
+	default:
+		// sampled whole: the sample digest is the SHA-256
 		d.sample = d.sha
 	}
 	return d, nil

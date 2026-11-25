@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,10 +96,13 @@ type state struct {
 	runDry  bool
 
 	// Interrupted import that can be resumed (guarded by mu).
-	resMeta  *resumeMeta
-	resState *importer.ResumeState
-	status   string
-	logs     *logbuf.Buffer
+	resMeta     *resumeMeta
+	resState    *importer.ResumeState
+	status      string
+	logs        *logbuf.Buffer
+	shownTab    string // tab the last frame drew ("" before the first frame)
+	logSeq      int    // lines appended so far (logs is capped, so its length stops growing)
+	drawnLogSeq int    // logSeq when the progress callback last asked for a redraw
 
 	browser *browser
 }
@@ -111,6 +115,24 @@ type volButtons struct{ pick, eject widget.Clickable }
 
 // Run opens the main window and blocks until it is closed.
 func Run() {
+	if dir := stateDir(); dir != "" {
+		lf, err := instanceLock(dir)
+		switch {
+		case errors.Is(err, importer.ErrLocked):
+			const msg = "Media Import is already running"
+			fmt.Fprintln(os.Stderr, msg)
+			if p, err := exec.LookPath("notify-send"); err == nil {
+				_ = exec.Command(p, "-a", "Media Import", "Media Import", msg).Run()
+			}
+			os.Exit(0)
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "WARN cannot take the single-instance lock:", err)
+		default:
+			// app.Main never returns: this keeps lf (and so the lock) alive, and
+			// its finalizer from closing it, for the life of the process.
+			defer runtime.KeepAlive(lf)
+		}
+	}
 	go func() {
 		w := new(app.Window)
 		w.Option(app.Title("Media Import"), app.Size(unit.Dp(1120), unit.Dp(820)), app.MinSize(unit.Dp(640), unit.Dp(480)))
@@ -370,6 +392,7 @@ func (s *state) addLog(line string) {
 func (s *state) appendLog(line string) {
 	s.mu.Lock()
 	s.logs.Append(time.Now().Format("15:04:05 ") + line)
+	s.logSeq++
 	s.mu.Unlock()
 }
 
@@ -461,11 +484,12 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 		if rs == nil {
 			s.mu.Lock()
 			hadResume := s.resMeta != nil
+			old := s.resState
 			s.mu.Unlock()
 			if hadResume {
 				s.addLog("Discarded the interrupted import (a new one was started)")
 			}
-			clearResume()
+			discardResume(old)
 			abs, _ := filepath.Abs(opt.Sources[0])
 			err := saveResumeMeta(resumeMeta{Settings: cfg, Source: abs, Dest: opt.Dest,
 				DirTemplate: dirT, NameTemplate: nameT, Started: time.Now()})
@@ -479,7 +503,7 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 	s.resMeta, s.resState = nil, nil
 	s.gate, s.runDry = gate, opt.DryRun
 	s.running, s.cancel = true, cancel
-	s.prog = importer.Progress{Phase: "scanning"}
+	s.prog = importer.Progress{Phase: importer.PhaseScanning}
 	s.speed, s.samples, s.runDest, s.titlePc = 0, nil, opt.Dest, -1
 	s.status = "Scanning…"
 	s.mu.Unlock()
@@ -539,15 +563,16 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 }
 
 // onProgress stores a progress snapshot. It returns the window title to set
-// ("" for none) and whether anything the progress page shows changed: a
-// paused or stalled import sends the same snapshot 10 times a second, and
-// redrawing the whole window for each would only burn power.
+// ("" for none) and whether anything the current tab shows changed: a paused
+// or stalled import sends the same snapshot 10 times a second, and redrawing
+// the whole window for each would only burn power. On the Setup and Log tabs
+// only what those tabs show counts.
 func (s *state) onProgress(p importer.Progress, now time.Time) (title string, redraw bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, prevSpeed := s.prog, s.speed
 	s.prog = p
-	if p.Phase == "importing" {
+	if p.Phase == importer.PhaseImporting {
 		s.samples = append(s.samples, speedSample{now, p.Bytes})
 		for len(s.samples) > 2 && now.Sub(s.samples[0].t) > speedWindow {
 			s.samples = s.samples[1:]
@@ -556,11 +581,23 @@ func (s *state) onProgress(p importer.Progress, now time.Time) (title string, re
 			s.speed = float64(p.Bytes-first.b) / now.Sub(first.t).Seconds()
 		}
 	}
-	if pc := percent(p); p.Phase == "importing" && pc != s.titlePc {
+	if pc := percent(p); p.Phase == importer.PhaseImporting && pc != s.titlePc {
 		s.titlePc = pc
 		title = fmt.Sprintf("%d%% · Media Import", pc)
 	}
-	return title, progressChanged(prev, p, prevSpeed, s.speed)
+	redraw = progressChanged(prev, p, prevSpeed, s.speed)
+	if redraw && s.shownTab != "" && s.shownTab != tabProgress {
+		// Away from the progress page only the action bar's status line, the
+		// tab label (it carries the percentage, as the title does) and, on the
+		// Log tab, new lines are visible.
+		redraw = title != "" || prev.Phase != p.Phase ||
+			statusLine(prev, true, s.runDry, "") != statusLine(p, true, s.runDry, "") ||
+			(s.shownTab == tabLog && s.logSeq != s.drawnLogSeq)
+	}
+	if redraw {
+		s.drawnLogSeq = s.logSeq
+	}
+	return title, redraw
 }
 
 // progressChanged reports whether the progress page draws p differently from
@@ -623,7 +660,7 @@ func (s *state) isDryRunning() bool {
 
 // percent is the overall byte-based completion, 0–100.
 func percent(p importer.Progress) int {
-	if p.Phase == "done" && p.Total > 0 && p.Done == p.Total {
+	if p.Phase == importer.PhaseDone && p.Total > 0 && p.Done == p.Total {
 		return 100
 	}
 	if p.TotalBytes <= 0 {

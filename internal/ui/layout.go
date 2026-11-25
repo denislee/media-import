@@ -38,6 +38,9 @@ const contentMax = 940
 
 func (s *state) layout(gtx layout.Context) layout.Dimensions {
 	running := s.update(gtx)
+	s.mu.Lock()
+	s.shownTab = s.tabs.Value
+	s.mu.Unlock()
 	wide := gtx.Constraints.Max.X >= gtx.Dp(wideMin)
 
 	main := func(gtx layout.Context) layout.Dimensions {
@@ -105,7 +108,10 @@ func (s *state) update(gtx layout.Context) bool {
 		}
 	}
 	if s.discardBtn.Clicked(gtx) && !running {
-		clearResume()
+		s.mu.Lock()
+		rs := s.resState
+		s.mu.Unlock()
+		discardResume(rs)
 		s.mu.Lock()
 		s.resMeta, s.resState = nil, nil
 		s.mu.Unlock()
@@ -203,7 +209,7 @@ func (s *state) topBar(gtx layout.Context, wide, running bool) layout.Dimensions
 	s.mu.Unlock()
 	progLabel := "Progress"
 	switch {
-	case running && p.Phase == "scanning":
+	case running && p.Phase == importer.PhaseScanning:
 		progLabel = "Progress · scanning"
 	case running:
 		progLabel = fmt.Sprintf("Progress · %d%%", percent(p))
@@ -401,7 +407,7 @@ func (s *state) actionBar(gtx layout.Context, running bool) layout.Dimensions {
 								if p.Paused {
 									fill = s.pal.warn
 								}
-								return s.bar(gtx, 6, float32(percent(p))/100, fill, "", p.Phase == "scanning")
+								return s.bar(gtx, 6, float32(percent(p))/100, fill, "", p.Phase == importer.PhaseScanning)
 							})
 						}),
 					)
@@ -414,7 +420,7 @@ func (s *state) actionBar(gtx layout.Context, running bool) layout.Dimensions {
 							if p.Paused {
 								ic, label = icPlay, "Resume"
 							}
-							if p.Phase != "importing" || s.isDryRunning() {
+							if p.Phase != importer.PhaseImporting || s.isDryRunning() {
 								gtx = gtx.Disabled()
 							}
 							return s.button(gtx, &s.pauseBtn, ic, label, btnSecondary)
@@ -444,7 +450,7 @@ func statusLine(p importer.Progress, running, dry bool, status string) string {
 	if !running {
 		return status
 	}
-	if p.Phase == "scanning" {
+	if p.Phase == importer.PhaseScanning {
 		return "Scanning source for media files…"
 	}
 	if p.Paused {
@@ -977,7 +983,7 @@ func (s *state) progressPage(gtx layout.Context, running bool) layout.Dimensions
 
 // progressSummary is the headline, overall bars and statistics of a run.
 func (s *state) progressSummary(gtx layout.Context, p importer.Progress, running bool, speed float64, status string) layout.Dimensions {
-	scanning := running && p.Phase == "scanning"
+	scanning := running && p.Phase == importer.PhaseScanning
 	frac := float32(percent(p)) / 100
 	if p.TotalBytes > 0 && !scanning {
 		frac = min(1, float32(p.Bytes)/float32(p.TotalBytes))
@@ -995,7 +1001,7 @@ func (s *state) progressSummary(gtx layout.Context, p importer.Progress, running
 		}
 	case p.Failed > 0:
 		fill, headIc, headCol, head = s.pal.warn, icWarn, s.pal.warn, "Finished with problems"
-	case p.Phase == "done" && p.Done == p.Total:
+	case p.Phase == importer.PhaseDone && p.Done == p.Total:
 		fill, headIc, headCol, head = s.pal.ok, icCheck, s.pal.ok, "Import complete"
 	default:
 		fill, headIc, headCol, head = s.pal.warn, icWarn, s.pal.warn, "Import stopped"
@@ -1005,7 +1011,7 @@ func (s *state) progressSummary(gtx layout.Context, p importer.Progress, running
 	switch {
 	case scanning:
 		label = fmt.Sprintf("%d media files found · %s", p.Found, importer.HumanSize(p.TotalBytes))
-	case p.Total == 0 && p.Phase == "done":
+	case p.Total == 0 && p.Phase == importer.PhaseDone:
 		label = "No media files found"
 	default:
 		label = fmt.Sprintf("%d%%  ·  %s of %s", percent(p), importer.HumanSize(p.Bytes), importer.HumanSize(p.TotalBytes))

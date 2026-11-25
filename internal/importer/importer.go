@@ -48,9 +48,16 @@ type Options struct {
 	Pause   *Gate        // optional pause/resume control
 }
 
+// Values of Progress.Phase.
+const (
+	PhaseScanning  = "scanning"
+	PhaseImporting = "importing"
+	PhaseDone      = "done"
+)
+
 // Progress is a snapshot of a running import.
 type Progress struct {
-	Phase      string // "scanning", "importing", "done"
+	Phase      string // PhaseScanning, PhaseImporting or PhaseDone
 	Found      int
 	Total      int
 	Done       int
@@ -164,6 +171,17 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 		r.gate = &Gate{}
 	}
 	if !opt.DryRun {
+		// The lock keeps a second instance from picking the same free names
+		// and from compacting the index under this run.
+		lf, err := LockFile(filepath.Join(opt.Dest, indexDir, "lock"))
+		switch {
+		case errors.Is(err, ErrLocked):
+			return Progress{}, ErrDestBusy
+		case err != nil:
+			logf("WARN cannot lock the destination (another import into it would not be detected): " + err.Error())
+		default:
+			defer lf.Close()
+		}
 		j, err := openJournal(opt.Journal, opt.Resume != nil)
 		if err != nil {
 			logf("WARN cannot write resume journal: " + err.Error())
@@ -179,7 +197,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 		r.idx = ix
 		defer r.idx.close()
 	}
-	r.phase.Store("scanning")
+	r.phase.Store(PhaseScanning)
 	start := time.Now()
 
 	stopTicker := make(chan struct{})
@@ -203,7 +221,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 
 	jobs, err := r.scan(ctx)
 	if err == nil {
-		r.phase.Store("importing")
+		r.phase.Store(PhaseImporting)
 		r.total.Store(int64(len(jobs)))
 		r.jnl.write("T", strconv.Itoa(len(jobs)), strconv.FormatInt(r.totalBytes.Load(), 10))
 		if !opt.DryRun {
@@ -224,7 +242,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	close(stopTicker)
 	<-tickerDone
 
-	r.phase.Store("done")
+	r.phase.Store(PhaseDone)
 	s := r.snapshot(start)
 	if progress != nil {
 		progress(s)
@@ -418,8 +436,26 @@ loop:
 // what resume must do; tests make it return an error to simulate one.
 var crashPoint = func(string) error { return nil }
 
+// chtimes is os.Chtimes; tests replace it.
+var chtimes = os.Chtimes
+
 // captureTime is media.CaptureTime; tests replace it to count calls.
 var captureTime = media.CaptureTime
+
+// errSourceChanged reports a source that grew or shrank while it was being
+// imported (size or mtime differs from the scan), so the copy may be short.
+var errSourceChanged = errors.New("changed while it was being imported; left in place, import again")
+
+// sameStat reports whether a and b describe the same version of a file.
+func sameStat(a, b fs.FileInfo) bool {
+	return a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+}
+
+// PartPath is the temporary file a copy to dst is written to before it is
+// renamed into place.
+func PartPath(dst string) string {
+	return filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
+}
 
 func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if ctx.Err() != nil {
@@ -457,15 +493,25 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	name := organize.FileName(r.opt.NameTemplate, f, strings.ToLower(ext))
 
 	sl.set("preparing", "")
-	dst, dup, err := r.reserve(ctx, dir, name, j, [2]time.Time{j.info.ModTime(), t}, sl)
-	if err != nil {
-		r.abandon(ctx, j, sl, err)
-		return
+	for attempt := 1; ; attempt++ {
+		dst, dup, err := r.reserve(ctx, dir, name, j, [2]time.Time{j.info.ModTime(), t}, sl)
+		if err != nil {
+			r.abandon(ctx, j, sl, err)
+			return
+		}
+		if dup != notDup {
+			r.skipDup(j, sl, dst, dup, digests{})
+			return
+		}
+		if !r.place(ctx, j, sl, dst, t, how, attempt < 3) {
+			return
+		}
 	}
-	if dup != notDup {
-		r.skipDup(j, sl, dst, dup, digests{})
-		return
-	}
+}
+
+// place transfers j to the reserved dst; it reports retry when dst was taken
+// by someone else meanwhile and another name should be reserved.
+func (r *runner) place(ctx context.Context, j job, sl *slot, dst string, t time.Time, how media.DateSource, canRetry bool) (retry bool) {
 	written := false
 	defer func() { r.release(dst, written, j.info.Size()) }()
 	var known []byte
@@ -474,11 +520,11 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		other, d, err := r.otherNameHit(ctx, j, sl)
 		if err != nil {
 			r.abandon(ctx, j, sl, err)
-			return
+			return false
 		}
 		if other != "" {
 			r.skipDup(j, sl, other, dupOther, d)
-			return
+			return false
 		}
 		known = d.sha // the source was hashed already; the copy need not hash it again
 	}
@@ -492,32 +538,39 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		r.byKind[j.kind].Add(1)
 		r.bytes.Add(j.info.Size())
 		r.logf(fmt.Sprintf("DRY %s %s -> %s [%s %s]", verb, j.src, dst, t.Format("2006-01-02 15:04:05"), how))
-		return
+		return false
 	}
 
 	mtime := j.info.ModTime()
 	if r.opt.MtimeCapture {
 		mtime = t
 	}
-	err = r.ensureDir(filepath.Dir(dst))
+	err := r.ensureDir(filepath.Dir(dst))
 	var d digests
 	if err == nil {
 		d, err = r.transfer(ctx, j, dst, mtime, sl, known)
 	}
 	if err != nil {
+		if canRetry && errors.Is(err, fs.ErrExist) {
+			r.logf(fmt.Sprintf("WARN %s appeared while copying; importing under another name", dst))
+			r.uncount(sl)
+			r.taken(dst)
+			return true
+		}
 		r.abandon(ctx, j, sl, err)
-		return
+		return false
 	}
 	written = true
 	r.jnl.done(j.src, dst)
 	if err := crashPoint("done"); err != nil {
 		r.fail(j.src, err)
-		return
+		return false
 	}
 	r.copied.Add(1)
 	r.byKind[j.kind].Add(1)
 	r.record(j, dst, d)
 	r.logf(fmt.Sprintf("%s %s -> %s [%s]", verb, j.src, dst, how))
+	return false
 }
 
 // abandon fails j unless the run was cancelled, counting the rest of the file
@@ -670,11 +723,16 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 	}
 	if r.opt.Move && r.sameDevice(j.info, filepath.Dir(dst)) {
 		sl.set("moving", dst)
-		if err := os.Rename(j.src, dst); err == nil {
+		if err := renameNoReplace(j.src, dst); err == nil {
 			r.bytes.Add(size)
 			sl.counted.Store(size)
 			sl.bytes.Store(size)
-			return digests{}, os.Chtimes(dst, atime, mtime)
+			if err := chtimes(dst, atime, mtime); err != nil {
+				r.logf(fmt.Sprintf("WARN %s: moved, but its date could not be set: %v", dst, err))
+			}
+			return digests{}, nil
+		} else if errors.Is(err, fs.ErrExist) {
+			return digests{}, err
 		}
 	}
 	wait := func() error { return r.gate.wait(ctx) }
@@ -716,7 +774,9 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 			r.verified.Add(1)
 			break
 		}
-		os.Remove(dst)
+		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return digests{}, fmt.Errorf("verify: checksum mismatch, and the bad copy could not be removed: %w", err)
+		}
 		if attempt == 2 {
 			return digests{}, errors.New("verify: destination checksum mismatch twice, copy removed (failing disk or card?)")
 		}
@@ -725,6 +785,14 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 	}
 	if r.opt.Move {
 		sl.set("removing source", "")
+		st, err := os.Stat(j.src)
+		if err != nil {
+			return digests{}, fmt.Errorf("copied but cannot check the source before removing it: %w", err)
+		}
+		if !sameStat(st, j.info) {
+			_ = os.Remove(dst)
+			return digests{}, errSourceChanged
+		}
 		if err := os.Remove(j.src); err != nil {
 			return digests{}, fmt.Errorf("copied but could not remove source: %w", err)
 		}
@@ -736,7 +804,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 // It removes a leftover temp file and, if the destination was completed,
 // records it as done. It reports whether the file needs no further work.
 func (r *runner) recoverPending(ctx context.Context, j job, dst string, sl *slot) bool {
-	part := filepath.Join(filepath.Dir(dst), "."+filepath.Base(dst)+".part")
+	part := PartPath(dst)
 	if err := os.Remove(part); err == nil {
 		r.logf("RESUME removed incomplete " + part)
 	}
