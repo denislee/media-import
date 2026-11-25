@@ -41,13 +41,13 @@ func (g *Gate) Paused() bool {
 	return g.ch != nil
 }
 
-// pausedFor is the total time spent paused so far.
-func (g *Gate) pausedFor() time.Duration {
+// pausedFor is the total time spent paused up to now.
+func (g *Gate) pausedFor(now time.Time) time.Duration {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	d := g.pausedOf
 	if g.ch != nil {
-		d += time.Since(g.since)
+		d += now.Sub(g.since)
 	}
 	return d
 }

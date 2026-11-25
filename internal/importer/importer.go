@@ -287,6 +287,7 @@ func validate(opt *Options) error {
 }
 
 func (r *runner) snapshot(start time.Time) Progress {
+	now := time.Now()
 	return Progress{
 		Phase:      r.phase.Load().(string),
 		Found:      int(r.found.Load()),
@@ -297,12 +298,13 @@ func (r *runner) snapshot(start time.Time) Progress {
 		Failed:     int(r.failed.Load()),
 		Bytes:      r.bytes.Load(),
 		TotalBytes: r.totalBytes.Load(),
-		Elapsed:    time.Since(start) - r.gate.pausedFor(),
-		Paused:     r.gate.Paused(),
-		Resumed:    int(r.resumed.Load()),
-		Verified:   int(r.verified.Load()),
-		Active:     r.active(),
-		ByKind:     r.kindCounts(),
+		// One instant for both, so Elapsed stays exactly constant while paused.
+		Elapsed:  now.Sub(start) - r.gate.pausedFor(now),
+		Paused:   r.gate.Paused(),
+		Resumed:  int(r.resumed.Load()),
+		Verified: int(r.verified.Load()),
+		Active:   r.active(),
+		ByKind:   r.kindCounts(),
 
 		DupCheckBytes: r.dupBytes.Load(),
 		DupQuick:      int(r.dupQuick.Load()),

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -493,28 +494,13 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 
 	go func() {
 		sum, err := importer.Run(ctx, opt, func(p importer.Progress) {
-			now := time.Now()
-			s.mu.Lock()
-			s.prog = p
-			if p.Phase == "importing" {
-				s.samples = append(s.samples, speedSample{now, p.Bytes})
-				for len(s.samples) > 2 && now.Sub(s.samples[0].t) > speedWindow {
-					s.samples = s.samples[1:]
-				}
-				if first := s.samples[0]; len(s.samples) > 1 && now.Sub(first.t) > 500*time.Millisecond {
-					s.speed = float64(p.Bytes-first.b) / now.Sub(first.t).Seconds()
-				}
-			}
-			title := ""
-			if pc := percent(p); p.Phase == "importing" && pc != s.titlePc {
-				s.titlePc = pc
-				title = fmt.Sprintf("%d%% · Media Import", pc)
-			}
-			s.mu.Unlock()
+			title, redraw := s.onProgress(p, time.Now())
 			if title != "" {
 				s.win.Option(app.Title(title))
 			}
-			s.win.Invalidate()
+			if redraw {
+				s.win.Invalidate()
+			}
 		}, s.appendLog)
 		msg := fmt.Sprintf("%s finished: %d imported, %d skipped, %d failed, %s in %s",
 			mode, sum.Copied, sum.Skipped, sum.Failed, importer.HumanSize(sum.Bytes), sum.Elapsed.Round(time.Second))
@@ -550,6 +536,45 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 		notify(msg)
 		s.win.Invalidate()
 	}()
+}
+
+// onProgress stores a progress snapshot. It returns the window title to set
+// ("" for none) and whether anything the progress page shows changed: a
+// paused or stalled import sends the same snapshot 10 times a second, and
+// redrawing the whole window for each would only burn power.
+func (s *state) onProgress(p importer.Progress, now time.Time) (title string, redraw bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev, prevSpeed := s.prog, s.speed
+	s.prog = p
+	if p.Phase == "importing" {
+		s.samples = append(s.samples, speedSample{now, p.Bytes})
+		for len(s.samples) > 2 && now.Sub(s.samples[0].t) > speedWindow {
+			s.samples = s.samples[1:]
+		}
+		if first := s.samples[0]; len(s.samples) > 1 && now.Sub(first.t) > 500*time.Millisecond {
+			s.speed = float64(p.Bytes-first.b) / now.Sub(first.t).Seconds()
+		}
+	}
+	if pc := percent(p); p.Phase == "importing" && pc != s.titlePc {
+		s.titlePc = pc
+		title = fmt.Sprintf("%d%% · Media Import", pc)
+	}
+	return title, progressChanged(prev, p, prevSpeed, s.speed)
+}
+
+// progressChanged reports whether the progress page draws p differently from
+// prev. Elapsed counts in whole seconds, as the stats tile shows it, and the
+// speed by its displayed text (not shown while paused).
+func progressChanged(prev, p importer.Progress, prevSpeed, speed float64) bool {
+	if prev.Elapsed.Round(time.Second) != p.Elapsed.Round(time.Second) {
+		return true
+	}
+	if !p.Paused && importer.HumanSize(int64(prevSpeed)) != importer.HumanSize(int64(speed)) {
+		return true
+	}
+	prev.Elapsed, p.Elapsed = 0, 0
+	return !reflect.DeepEqual(prev, p)
 }
 
 // dupSummary describes how the duplicates of a finished run were recognised.
