@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 // The destination index remembers what was imported, so a repeat import can
@@ -101,10 +102,16 @@ func (ix *index) load(p string) (int, error) {
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	lines := 0
 	for sc.Scan() {
-		line := sc.Text()
-		if line == "" {
+		b := sc.Bytes()
+		if len(b) == 0 {
 			continue
 		}
+		// line aliases the scanner's buffer, which the next Scan overwrites.
+		// That saves a string per line, and is safe because the parsers copy
+		// everything they keep: parseIndexLine copies name and rel and decodes
+		// the digests into a buffer of their own, and the removal key is only
+		// used for lookups. TestIndexLoadDoesNotAliasLines guards it.
+		line := unsafe.String(unsafe.SliceData(b), len(b))
 		lines++
 		if strings.HasPrefix(line, "X\t") {
 			if k, rel, ok := parseRemovalLine(line); ok {
