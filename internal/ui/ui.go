@@ -67,11 +67,10 @@ type state struct {
 
 	volMu     sync.Mutex
 	vols      []devices.Volume
-	volBtns   []widget.Clickable
-	ejectBtns []widget.Clickable
+	volBtns   map[string]*volButtons // by Volume.Path
 	unmounted []devices.Unmounted
-	mountBtns []widget.Clickable
-	unm       devices.UnmountedCache // runs lsblk only when block devices or mounts changed
+	mountBtns map[string]*widget.Clickable // by Unmounted.Dev
+	unm       devices.UnmountedCache       // runs lsblk only when block devices or mounts changed
 
 	// Mount/eject state (guarded by mu).
 	opBusy      bool
@@ -102,6 +101,12 @@ type state struct {
 
 	browser *browser
 }
+
+// volButtons are a mounted volume's row and eject buttons. They live on the
+// heap, keyed by device, so a frame that took their addresses under volMu keeps
+// valid ones after refreshVolumes replaces the lists, and a button keeps its
+// state when the list order changes.
+type volButtons struct{ pick, eject widget.Clickable }
 
 // Run opens the main window and blocks until it is closed.
 func Run() {
@@ -198,23 +203,39 @@ func (s *state) loop() error {
 	}
 }
 
+// listVolumes and listUnmounted are the device sources; tests replace them.
+var (
+	listVolumes   = devices.List
+	listUnmounted = (*devices.UnmountedCache).Get
+)
+
 // refreshVolumes reloads mounted volumes; reports whether the list changed.
 func (s *state) refreshVolumes() bool {
-	vols := devices.List()
-	unm := s.unm.Get()
+	vols := listVolumes()
+	unm := listUnmounted(&s.unm)
 	s.volMu.Lock()
 	defer s.volMu.Unlock()
 	if slices.Equal(vols, s.vols) && slices.Equal(unm, s.unmounted) {
 		return false
 	}
 	s.vols, s.unmounted = vols, unm
-	if len(s.volBtns) < len(vols) {
-		s.volBtns = append(s.volBtns, make([]widget.Clickable, len(vols)-len(s.volBtns))...)
-		s.ejectBtns = append(s.ejectBtns, make([]widget.Clickable, len(vols)-len(s.ejectBtns))...)
+	volBtns := make(map[string]*volButtons, len(vols))
+	for _, v := range vols {
+		b := s.volBtns[v.Path]
+		if b == nil {
+			b = new(volButtons)
+		}
+		volBtns[v.Path] = b
 	}
-	if len(s.mountBtns) < len(unm) {
-		s.mountBtns = append(s.mountBtns, make([]widget.Clickable, len(unm)-len(s.mountBtns))...)
+	mountBtns := make(map[string]*widget.Clickable, len(unm))
+	for _, u := range unm {
+		b := s.mountBtns[u.Dev]
+		if b == nil {
+			b = new(widget.Clickable)
+		}
+		mountBtns[u.Dev] = b
 	}
+	s.volBtns, s.mountBtns = volBtns, mountBtns
 	return true
 }
 

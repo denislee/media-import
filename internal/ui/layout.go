@@ -125,16 +125,17 @@ func (s *state) update(gtx layout.Context) bool {
 	s.volMu.Lock()
 	var req *privOp
 	for i := range s.vols {
-		if s.volBtns[i].Clicked(gtx) {
+		b := s.volBtns[s.vols[i].Path]
+		if b.pick.Clicked(gtx) {
 			s.srcEd.SetText(s.vols[i].Path)
 		}
-		if s.ejectBtns[i].Clicked(gtx) {
+		if b.eject.Clicked(gtx) {
 			op := ejectOp(s, s.vols[i])
 			req = &op
 		}
 	}
 	for i := range s.unmounted {
-		if s.mountBtns[i].Clicked(gtx) {
+		if s.mountBtns[s.unmounted[i].Dev].Clicked(gtx) {
 			op := mountOp(s, s.unmounted[i])
 			req = &op
 		}
@@ -522,8 +523,8 @@ func (s *state) deviceItems() []devItem {
 	s.mu.Unlock()
 	s.volMu.Lock()
 	defer s.volMu.Unlock()
-	var items []devItem
-	for i, v := range s.vols {
+	items := make([]devItem, 0, len(s.vols)+len(s.unmounted))
+	for _, v := range s.vols {
 		ic := icCard
 		if strings.Contains(v.Path, "/gvfs/") || strings.Contains(v.FS, "mtp") || strings.Contains(v.FS, "gvfs") {
 			ic = icPhone
@@ -533,11 +534,12 @@ func (s *state) deviceItems() []devItem {
 		if v.FS != "" {
 			sub = v.FS + " · " + v.Path
 		}
-		items = append(items, devItem{clk: &s.volBtns[i], ic: ic, title: v.Label, sub: sub, selected: sel,
-			action: &s.ejectBtns[i], busy: busy})
+		b := s.volBtns[v.Path]
+		items = append(items, devItem{clk: &b.pick, ic: ic, title: v.Label, sub: sub, selected: sel,
+			action: &b.eject, busy: busy})
 	}
-	for i, u := range s.unmounted {
-		items = append(items, devItem{clk: &s.mountBtns[i], ic: icUSB, title: u.Name(),
+	for _, u := range s.unmounted {
+		items = append(items, devItem{clk: s.mountBtns[u.Dev], ic: icUSB, title: u.Name(),
 			sub: fmt.Sprintf("Not mounted · %s · %s", u.FS, importer.HumanSize(u.Size)), trailing: "Mount", busy: busy})
 	}
 	return items
