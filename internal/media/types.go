@@ -9,6 +9,7 @@ import (
 // Kind is a broad media category.
 type Kind int
 
+// The media kinds; Unknown is a file that is not imported.
 const (
 	Unknown Kind = iota
 	Image

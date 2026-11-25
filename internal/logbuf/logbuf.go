@@ -13,12 +13,12 @@ type Buffer struct {
 	lines []string
 }
 
-// New returns a Buffer that keeps at most max lines. It panics if max <= 0.
-func New(max int) *Buffer {
-	if max <= 0 {
+// New returns a Buffer that keeps at most n lines. It panics if n <= 0.
+func New(n int) *Buffer {
+	if n <= 0 {
 		panic("logbuf: New called with non-positive max")
 	}
-	return &Buffer{max: max}
+	return &Buffer{max: n}
 }
 
 // Append adds s as the newest line.

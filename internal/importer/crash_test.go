@@ -35,7 +35,7 @@ func TestGroupCommitFsyncs(t *testing.T) {
 	o.Journal = filepath.Join(root, "journal")
 	syncs := countSyncs(t)
 	if s := run(t, o); s.Copied != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	// One shared fsync per copy at most (B before the rename), plus closing
 	// the journal and the index.
@@ -44,7 +44,7 @@ func TestGroupCommitFsyncs(t *testing.T) {
 	}
 	syncs.Store(0)
 	if s := run(t, o); s.Skipped != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	if got := syncs.Load(); got > 2 {
 		t.Errorf("re-import: %d fsyncs for %d skipped files, want only the closing ones", got, n)
@@ -199,7 +199,7 @@ func TestCrashMatrix(t *testing.T) {
 				o.Resume = rs
 				s, err := Run(context.Background(), o, nil, nil)
 				if err != nil || s.Failed != 0 || s.Copied+s.Resumed+s.Skipped != 4 {
-					t.Fatalf("resume: %v %+v", err, s.Progress)
+					t.Fatalf("resume: %v %+v", err, s)
 				}
 				if got := listDest(t, dst); strings.Join(got, ",") != strings.Join(want, ",") {
 					t.Fatalf("destination after resume:\n%v\nwant\n%v", got, want)

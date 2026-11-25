@@ -36,12 +36,12 @@ type Options struct {
 	SkipDups      bool   // skip files already present (same size + content)
 	DupCheck      string // DupCheckFast (default) or DupCheckFull
 	DupAnyName    bool   // also detect copies stored under another name (hashes the source; needs the index)
-	NoIndex       bool   // neither read nor write the destination index
+	NoIndex       bool   // neither read nor write the destination index (tests and benchmarks; the UI uses the default)
 	Verify        bool   // re-read the copy and compare checksums
 	UseFFprobe    bool   // use ffprobe for formats without built-in parsers
 	MtimeCapture  bool   // set file mtime to the capture time instead of the source mtime
 	IncludeHidden bool
-	Workers       int
+	Workers       int // 0 = default; set by tests and benchmarks, the UI uses the default
 
 	Journal string       // append-only progress journal used to resume; "" disables
 	Resume  *ResumeState // state of an interrupted run to continue (from ReadJournal)
@@ -117,11 +117,6 @@ func (s *slot) end() {
 	s.mu.Unlock()
 }
 
-// Summary is the final result of a run.
-type Summary struct {
-	Progress
-}
-
 type job struct {
 	src    string
 	kind   media.Kind
@@ -157,12 +152,12 @@ type runner struct {
 
 // Run executes an import. progress is called periodically (from another
 // goroutine) and logf for each notable event; both may be nil.
-func Run(ctx context.Context, opt Options, progress func(Progress), logf func(string)) (Summary, error) {
+func Run(ctx context.Context, opt Options, progress func(Progress), logf func(string)) (Progress, error) {
 	if logf == nil {
 		logf = func(string) {}
 	}
 	if err := validate(&opt); err != nil {
-		return Summary{}, err
+		return Progress{}, err
 	}
 	r := &runner{opt: opt, logf: logf, reserved: map[string]resv{}, seen: map[string]int64{}, names: map[string]*nameSlots{}, slots: make([]slot, opt.Workers), gate: opt.Pause}
 	if r.gate == nil {
@@ -230,9 +225,9 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	<-tickerDone
 
 	r.phase.Store("done")
-	s := Summary{Progress: r.snapshot(start)}
+	s := r.snapshot(start)
 	if progress != nil {
-		progress(s.Progress)
+		progress(s)
 	}
 	return s, err
 }
@@ -464,10 +459,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	sl.set("preparing", "")
 	dst, dup, err := r.reserve(ctx, dir, name, j, [2]time.Time{j.info.ModTime(), t}, sl)
 	if err != nil {
-		if ctx.Err() == nil {
-			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load())) // count it as processed so the bar can reach 100%
-			r.fail(j.src, err)
-		}
+		r.abandon(ctx, j, sl, err)
 		return
 	}
 	if dup != notDup {
@@ -481,10 +473,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	if r.opt.SkipDups && r.opt.DupAnyName {
 		other, d, err := r.otherNameHit(ctx, j, sl)
 		if err != nil {
-			if ctx.Err() == nil {
-				r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
-				r.fail(j.src, err)
-			}
+			r.abandon(ctx, j, sl, err)
 			return
 		}
 		if other != "" {
@@ -516,10 +505,7 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 		d, err = r.transfer(ctx, j, dst, mtime, sl, known)
 	}
 	if err != nil {
-		if ctx.Err() == nil {
-			r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
-			r.fail(j.src, err)
-		}
+		r.abandon(ctx, j, sl, err)
 		return
 	}
 	written = true
@@ -532,6 +518,15 @@ func (r *runner) handle(ctx context.Context, j job, sl *slot) {
 	r.byKind[j.kind].Add(1)
 	r.record(j, dst, d)
 	r.logf(fmt.Sprintf("%s %s -> %s [%s]", verb, j.src, dst, how))
+}
+
+// abandon fails j unless the run was cancelled, counting the rest of the file
+// as processed so the bar can still reach 100%.
+func (r *runner) abandon(ctx context.Context, j job, sl *slot, err error) {
+	if ctx.Err() == nil {
+		r.bytes.Add(max(0, j.info.Size()-sl.counted.Load()))
+		r.fail(j.src, err)
+	}
 }
 
 func srcKey(j job) idxKey {
@@ -726,8 +721,7 @@ func (r *runner) transfer(ctx context.Context, j job, dst string, mtime time.Tim
 			return digests{}, errors.New("verify: destination checksum mismatch twice, copy removed (failing disk or card?)")
 		}
 		r.logf(fmt.Sprintf("WARN %s: destination checksum mismatch, copying again", dst))
-		r.bytes.Add(-sl.counted.Load())
-		sl.counted.Store(0)
+		r.uncount(sl)
 	}
 	if r.opt.Move {
 		sl.set("removing source", "")

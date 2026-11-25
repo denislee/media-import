@@ -138,7 +138,7 @@ func TestCollisionStatsAndDups(t *testing.T) {
 	stats := countStats(t)
 	s := run(t, o)
 	if s.Copied != n || s.Skipped != 1 {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	if got := stats.Load(); got > 3*(n+1) {
 		t.Errorf("%d stats for %d same-named files", got, n+1)

@@ -510,7 +510,7 @@ func (s *state) launch(cfg settings, dirT, nameT string, rs *importer.ResumeStat
 		case err != nil:
 			msg = "Error: " + err.Error()
 		}
-		if line := dupSummary(sum.Progress); line != "" {
+		if line := dupSummary(sum); line != "" {
 			s.addLog(line)
 		}
 		if sum.Verified > 0 {

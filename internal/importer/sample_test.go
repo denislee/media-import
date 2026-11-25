@@ -109,7 +109,7 @@ func TestDupAnyNameSamplesFirst(t *testing.T) {
 	o.Verify = false
 	o.DupAnyName = true
 	if s := run(t, o); s.Copied != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 
 	o2 := baseOpts(card2, dst)
@@ -117,7 +117,7 @@ func TestDupAnyNameSamplesFirst(t *testing.T) {
 	o2.DupAnyName = true
 	s := run(t, o2)
 	if s.Copied != n || s.DupOtherName != 0 {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	if s.DupCheckBytes > n*3*sampleSize {
 		t.Fatalf("dup check read %d bytes, want at most %d", s.DupCheckBytes, n*3*sampleSize)
@@ -141,7 +141,7 @@ func TestDupAnyNameOldIndexHashesFully(t *testing.T) {
 	o.Verify = false
 	o.DupAnyName = true
 	if s := run(t, o); s.Copied != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 
 	// Strip the sample field, leaving records older versions would write.
@@ -168,7 +168,7 @@ func TestDupAnyNameOldIndexHashesFully(t *testing.T) {
 	o2.DupAnyName = true
 	s := run(t, o2)
 	if s.Copied != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	if s.DupCheckBytes < int64(n)*size {
 		t.Fatalf("dup check read %d bytes, want at least %d", s.DupCheckBytes, int64(n)*size)
@@ -190,7 +190,7 @@ func TestDupAnyNameStillFindsCopies(t *testing.T) {
 	o.Verify = false
 	o.DupAnyName = true
 	if s := run(t, o); s.Copied != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 
 	// Hide the index's source keys so only the checksum lookup can match.
@@ -208,6 +208,6 @@ func TestDupAnyNameStillFindsCopies(t *testing.T) {
 	o3.DupAnyName = true
 	s := run(t, o3)
 	if s.Skipped != n || s.DupOtherName != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 }

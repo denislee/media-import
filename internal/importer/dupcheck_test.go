@@ -56,11 +56,11 @@ func prepDup(t *testing.T, srcData, dstData []byte, dstMtime time.Time) (src, ds
 	return
 }
 
-func run(t testing.TB, o Options) Summary {
+func run(t testing.TB, o Options) Progress {
 	t.Helper()
 	sum, err := Run(context.Background(), o, nil, nil)
 	if err != nil || sum.Failed != 0 {
-		t.Fatalf("run: %v %+v", err, sum.Progress)
+		t.Fatalf("run: %v %+v", err, sum)
 	}
 	return sum
 }
@@ -77,7 +77,7 @@ func TestFastPathSampledTradeoff(t *testing.T) {
 		src, dst := prepDup(t, data, other, t1)
 		sum := run(t, dupOpts(src, dst, tc.mode))
 		if sum.Skipped != tc.wantSkip || sum.DupQuick != tc.wantQuick {
-			t.Errorf("%s: %+v", tc.mode, sum.Progress)
+			t.Errorf("%s: %+v", tc.mode, sum)
 		}
 		if tc.mode == DupCheckFast && sum.DupCheckBytes > 2*3*sampleSize {
 			t.Errorf("fast path read %d bytes", sum.DupCheckBytes)
@@ -92,7 +92,7 @@ func TestFastPathSampleMismatchCopies(t *testing.T) {
 	src, dst := prepDup(t, data, other, t1)
 	sum := run(t, dupOpts(src, dst, DupCheckFast))
 	if sum.Copied != 1 || sum.Skipped != 0 {
-		t.Fatalf("%+v", sum.Progress)
+		t.Fatalf("%+v", sum)
 	}
 	exists(t, filepath.Join(dst, "2021/06/07/IMG_1.jpg"))
 }
@@ -106,13 +106,13 @@ func TestMtimeMismatchFallsBackToFull(t *testing.T) {
 	src, dst := prepDup(t, data, data, far)
 	sum := run(t, dupOpts(src, dst, DupCheckFast))
 	if sum.Skipped != 1 || sum.DupFull != 1 || sum.DupQuick != 0 {
-		t.Errorf("identical: %+v", sum.Progress)
+		t.Errorf("identical: %+v", sum)
 	}
 
 	src, dst = prepDup(t, data, other, far)
 	sum = run(t, dupOpts(src, dst, DupCheckFast))
 	if sum.Copied != 1 || sum.Skipped != 0 {
-		t.Errorf("differing: %+v", sum.Progress)
+		t.Errorf("differing: %+v", sum)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestMtimeTolerance(t *testing.T) {
 		src, dst := prepDup(t, data, data, t1.Add(tc.off))
 		sum := run(t, dupOpts(src, dst, DupCheckFast))
 		if sum.Skipped != 1 || (sum.DupQuick == 1) != tc.quick {
-			t.Errorf("offset %v: %+v", tc.off, sum.Progress)
+			t.Errorf("offset %v: %+v", tc.off, sum)
 		}
 	}
 }
@@ -143,11 +143,11 @@ func TestMtimeCaptureEitherWay(t *testing.T) {
 		o := dupOpts(src, dst, DupCheckFast)
 		o.MtimeCapture = firstCapture
 		if s := run(t, o); s.Copied != 1 {
-			t.Fatalf("first run %+v", s.Progress)
+			t.Fatalf("first run %+v", s)
 		}
 		o.MtimeCapture = !firstCapture
 		if s := run(t, o); s.Skipped != 1 || s.DupQuick != 1 {
-			t.Errorf("capture=%v then %v: %+v", firstCapture, !firstCapture, s.Progress)
+			t.Errorf("capture=%v then %v: %+v", firstCapture, !firstCapture, s)
 		}
 	}
 }
@@ -161,7 +161,7 @@ func TestSeveralSameSizeCandidates(t *testing.T) {
 	writeBytes(t, filepath.Join(dst, "2021/06/07/IMG_2.jpg"), data, t1.Add(time.Hour))
 	sum := run(t, dupOpts(src, dst, DupCheckFast))
 	if sum.Skipped != 1 || sum.DupFull != 1 {
-		t.Fatalf("%+v", sum.Progress)
+		t.Fatalf("%+v", sum)
 	}
 	if sum.Bytes != sum.TotalBytes {
 		t.Errorf("progress %d of %d", sum.Bytes, sum.TotalBytes)
@@ -180,7 +180,7 @@ func TestConcurrentCollisions(t *testing.T) {
 	o := dupOpts(src, dst, DupCheckFast)
 	o.Workers = 16
 	if s := run(t, o); s.Copied != n {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	ents, err := os.ReadDir(filepath.Join(dst, "2021/06/07"))
 	if err != nil || len(ents) != n {
@@ -188,7 +188,7 @@ func TestConcurrentCollisions(t *testing.T) {
 	}
 	// A second concurrent run finds every one of them.
 	if s := run(t, o); s.Skipped != n || s.Copied != 0 {
-		t.Fatalf("rerun %+v", s.Progress)
+		t.Fatalf("rerun %+v", s)
 	}
 }
 
@@ -210,7 +210,7 @@ func TestIndexSkipsDateAndContent(t *testing.T) {
 	calls := countCaptureTime(t)
 	sum := run(t, o)
 	if sum.Skipped != 3 || sum.DupIndexed != 3 {
-		t.Fatalf("%+v", sum.Progress)
+		t.Fatalf("%+v", sum)
 	}
 	if calls.Load() != 0 {
 		t.Errorf("CaptureTime called %d times on an indexed re-import", calls.Load())
@@ -234,7 +234,7 @@ func TestIndexStaleEntries(t *testing.T) {
 	writeBytes(t, a, []byte("xyz"), t2)
 	sum := run(t, o)
 	if sum.Copied != 1 || sum.DupIndexed != 2 {
-		t.Fatalf("modified: %+v", sum.Progress)
+		t.Fatalf("modified: %+v", sum)
 	}
 
 	// Destination deleted: copied again.
@@ -243,7 +243,7 @@ func TestIndexStaleEntries(t *testing.T) {
 	}
 	sum = run(t, o)
 	if sum.Copied != 1 {
-		t.Fatalf("deleted: %+v", sum.Progress)
+		t.Fatalf("deleted: %+v", sum)
 	}
 }
 
@@ -252,14 +252,14 @@ func TestIndexCorruptIgnored(t *testing.T) {
 	o := baseOpts(src, dst)
 	writeBytes(t, indexPath(dst), []byte("garbage\nF\t\"x\"\t1\nF\t\"A.JPG\"\t3\t1\t\"../escape\"\t1\t-\nF\t\"A.JPG\"\t3\tzz\t\"a\"\t1\t-\n"), t1)
 	if s := run(t, o); s.Copied != 3 {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 	// Torn last line after the valid records.
 	f, _ := os.OpenFile(indexPath(dst), os.O_APPEND|os.O_WRONLY, 0)
 	f.WriteString("F\t\"IMG")
 	f.Close()
 	if s := run(t, o); s.Skipped != 3 || s.DupIndexed != 3 {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 }
 
@@ -270,7 +270,7 @@ func TestIndexFullModeComparesContent(t *testing.T) {
 	o.DupCheck = DupCheckFull
 	sum := run(t, o)
 	if sum.Skipped != 3 || sum.DupFull != 3 || sum.DupIndexed != 0 {
-		t.Fatalf("%+v", sum.Progress)
+		t.Fatalf("%+v", sum)
 	}
 }
 
@@ -286,7 +286,7 @@ func TestDuplicateUnderOtherName(t *testing.T) {
 	writeBytes(t, indexPath(dst), []byte(strings.ReplaceAll(string(idx), "F\t\"", "F\t\"x")), t1)
 	sum := run(t, o)
 	if sum.Skipped != 3 || sum.DupOtherName != 3 || sum.Copied != 0 {
-		t.Fatalf("%+v", sum.Progress)
+		t.Fatalf("%+v", sum)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "2021")); err != nil {
 		t.Fatal(err)
@@ -302,7 +302,7 @@ func TestScanSkipsIndexDir(t *testing.T) {
 	o := baseOpts(src, dst)
 	o.IncludeHidden = true
 	if s := run(t, o); s.Total != 4 {
-		t.Fatalf("%+v", s.Progress)
+		t.Fatalf("%+v", s)
 	}
 }
 
@@ -366,7 +366,7 @@ func BenchmarkReimport(b *testing.B) {
 			for b.Loop() {
 				s := run(b, o)
 				if s.Skipped != files {
-					b.Fatalf("%+v", s.Progress)
+					b.Fatalf("%+v", s)
 				}
 				read = s.DupCheckBytes
 			}

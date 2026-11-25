@@ -67,7 +67,7 @@ func TestImportCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sum.Copied != 3 || sum.Failed != 0 || sum.Skipped != 0 {
-		t.Fatalf("summary %+v", sum.Progress)
+		t.Fatalf("summary %+v", sum)
 	}
 	a := exists(t, filepath.Join(dst, "2021/06/07/A.jpg"))
 	exists(t, filepath.Join(dst, "2021/06/07/A_1.jpg"))
@@ -85,7 +85,7 @@ func TestImportCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sum.Copied != 0 || sum.Skipped != 3 {
-		t.Fatalf("rerun summary %+v", sum.Progress)
+		t.Fatalf("rerun summary %+v", sum)
 	}
 	if sum.Bytes != sum.TotalBytes {
 		t.Fatalf("duplicate-only run counted %d of %d bytes", sum.Bytes, sum.TotalBytes)
@@ -106,7 +106,7 @@ func TestImportDryRun(t *testing.T) {
 		mu.Unlock()
 	})
 	if err != nil || sum.Copied != 3 {
-		t.Fatalf("%v %+v", err, sum.Progress)
+		t.Fatalf("%v %+v", err, sum)
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
 		t.Fatal("dry run created destination")
@@ -122,7 +122,7 @@ func TestImportMoveAndMtimeCapture(t *testing.T) {
 	o.Move, o.MtimeCapture, o.NameTemplate = true, true, "{YYYY}{MM}{DD}_{name}"
 	sum, err := Run(context.Background(), o, nil, nil)
 	if err != nil || sum.Copied != 3 {
-		t.Fatalf("%v %+v", err, sum.Progress)
+		t.Fatalf("%v %+v", err, sum)
 	}
 	fi := exists(t, filepath.Join(dst, "2020/01/02/20200102_IMG_20200102_030405.png"))
 	if want := time.Date(2020, 1, 2, 3, 4, 5, 0, time.Local); !fi.ModTime().Equal(want) {
@@ -140,7 +140,7 @@ func TestImportHidden(t *testing.T) {
 	o.IncludeHidden = true
 	sum, err := Run(context.Background(), o, nil, nil)
 	if err != nil || sum.Copied != 4 {
-		t.Fatalf("%v %+v", err, sum.Progress)
+		t.Fatalf("%v %+v", err, sum)
 	}
 }
 
@@ -152,7 +152,7 @@ func TestDestInsideSourceIsSkipped(t *testing.T) {
 	}
 	sum, err := Run(context.Background(), baseOpts(src, dst), nil, nil)
 	if err != nil || sum.Total != 3 || sum.Skipped != 3 {
-		t.Fatalf("%v %+v", err, sum.Progress)
+		t.Fatalf("%v %+v", err, sum)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 // DateSource says where a capture time came from.
 type DateSource string
 
+// The capture-time sources, in the order CaptureTime tries them.
 const (
 	SourceEXIF     DateSource = "exif"
 	SourceVideo    DateSource = "video-header"

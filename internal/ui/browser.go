@@ -223,7 +223,7 @@ func (b *browser) layout(gtx layout.Context, s *state) layout.Dimensions {
 						btn(&b.newBtn, icNewDir, "Create folder"),
 					)
 				} else {
-					children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return layout.Dimensions{} }))
+					children = append(children, layout.Flexed(1, func(layout.Context) layout.Dimensions { return layout.Dimensions{} }))
 				}
 				children = append(children,
 					layout.Rigid(spacer(12, 0)),

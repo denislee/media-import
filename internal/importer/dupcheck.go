@@ -348,8 +348,7 @@ func (r *runner) compare(ctx context.Context, j job, existing string, sl *slot) 
 		r.bytes.Add(n)
 	})
 	if err != nil || !same {
-		r.bytes.Add(-sl.counted.Swap(0))
-		sl.bytes.Store(0)
+		r.uncount(sl)
 	}
 	return same, err
 }
@@ -375,10 +374,16 @@ func (r *runner) compareHashed(ctx context.Context, j job, existing string, sl *
 	}, true)
 	same := err == nil && bytes.Equal(d, *srcSum)
 	if !same {
-		r.bytes.Add(-sl.counted.Swap(0))
-		sl.bytes.Store(0)
+		r.uncount(sl)
 	}
 	return same, err
+}
+
+// uncount takes the bytes the slot's file added to the total back out and
+// clears its bar, for a file that will be read (and counted) again.
+func (r *runner) uncount(sl *slot) {
+	r.bytes.Add(-sl.counted.Swap(0))
+	sl.bytes.Store(0)
 }
 
 func (r *runner) timeDup(start time.Time) { r.dupNanos.Add(int64(time.Since(start))) }

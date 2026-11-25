@@ -46,7 +46,7 @@ func TestResumeAfterInterruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sum.Resumed != 2 || sum.Copied != 1 || sum.Failed != 0 || sum.Verified != 1 {
-		t.Fatalf("resume summary %+v", sum.Progress)
+		t.Fatalf("resume summary %+v", sum)
 	}
 	if _, err := os.Stat(part); !os.IsNotExist(err) {
 		t.Error("leftover .part not removed")
@@ -61,7 +61,7 @@ func TestPause(t *testing.T) {
 	src, dst := setup(t)
 	g := &Gate{}
 	g.Pause()
-	done := make(chan Summary)
+	done := make(chan Progress)
 	go func() {
 		o := baseOpts(src, dst)
 		o.Pause = g
@@ -77,7 +77,7 @@ func TestPause(t *testing.T) {
 	select {
 	case s := <-done:
 		if s.Copied != 3 {
-			t.Fatalf("after resume %+v", s.Progress)
+			t.Fatalf("after resume %+v", s)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("did not resume")

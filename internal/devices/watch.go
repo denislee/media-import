@@ -13,8 +13,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Watch calls changed (block is true for block-device events) whenever the mounted volumes or the block devices may
-// have changed, until ctx is done. It sleeps in the kernel between events:
+// Watch calls changed whenever the mounted volumes or block devices may have
+// changed, until ctx is done; block is true for block-device events. It
+// sleeps in the kernel between events:
 //
 //   - /proc/self/mountinfo is polled for POLLPRI, which the kernel raises
 //     when the mount table changes;
