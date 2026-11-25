@@ -555,12 +555,18 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 		}
 	}
 
-	sh := newSampleHasher(info.Size())
-	writers := []io.Writer{out, sh}
+	writers := []io.Writer{out}
 	var h hash.Hash
 	if knownSum == nil {
 		h = sha256.New()
 		writers = append(writers, h)
+	}
+	// A file no larger than the sampled blocks is sampled whole, so its sample
+	// digest is its SHA-256: when that is computed anyway, hash the data once.
+	var sh *sampleHasher
+	if h == nil || len(sampleRanges(info.Size())) > 1 {
+		sh = newSampleHasher(info.Size())
+		writers = append(writers, sh)
 	}
 	pb := getBuf()
 	defer putBuf(pb)
@@ -613,9 +619,15 @@ func copyFile(src, dst string, info fs.FileInfo, atime, mtime time.Time, wait fu
 		return digests{}, err
 	}
 	ok = true
-	d := digests{sha: knownSum, sample: sh.sum()}
+	d := digests{sha: knownSum}
 	if h != nil {
 		d.sha = h.Sum(nil)
+	}
+	switch {
+	case sh != nil:
+		d.sample = sh.sum()
+	case written == info.Size(): // as sh.sum, nil if the file changed while read
+		d.sample = d.sha
 	}
 	return d, nil
 }
