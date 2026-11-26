@@ -142,6 +142,7 @@ type runner struct {
 	slots                                []slot
 	resumed, verified                    atomic.Int64
 	gate                                 *Gate
+	pausedAtStart                        time.Duration // gate pause time before Run began
 	jnl                                  *journal
 	byKind                               [media.Audio + 1]atomic.Int64
 
@@ -199,6 +200,7 @@ func Run(ctx context.Context, opt Options, progress func(Progress), logf func(st
 	}
 	r.phase.Store(PhaseScanning)
 	start := time.Now()
+	r.pausedAtStart = r.gate.pausedFor(start)
 
 	stopTicker := make(chan struct{})
 	tickerDone := make(chan struct{})
@@ -312,7 +314,8 @@ func (r *runner) snapshot(start time.Time) Progress {
 		Bytes:      r.bytes.Load(),
 		TotalBytes: r.totalBytes.Load(),
 		// One instant for both, so Elapsed stays exactly constant while paused.
-		Elapsed:  now.Sub(start) - r.gate.pausedFor(now),
+		// Pausing done before Run began is not part of this run's time.
+		Elapsed:  now.Sub(start) - (r.gate.pausedFor(now) - r.pausedAtStart),
 		Paused:   r.gate.Paused(),
 		Resumed:  int(r.resumed.Load()),
 		Verified: int(r.verified.Load()),
