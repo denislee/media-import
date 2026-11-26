@@ -54,7 +54,7 @@ func replacerExpand(tpl string, f Fields) string {
 }
 
 func TestExpandMatchesReplacer(t *testing.T) {
-	var tpls []string
+	tpls := make([]string, 0, len(DirPresets)+len(NamePresets)+7)
 	for _, p := range DirPresets {
 		tpls = append(tpls, p.Template)
 	}

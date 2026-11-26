@@ -95,7 +95,8 @@ func tiffBlock(bo binary.ByteOrder, magic uint16, dt, dto string, exifIFD bool) 
 }
 
 func jpegSeg(marker byte, payload []byte) []byte {
-	s := []byte{0xFF, marker, 0, 0}
+	s := make([]byte, 4, 4+len(payload))
+	s[0], s[1] = 0xFF, marker
 	binary.BigEndian.PutUint16(s[2:], uint16(len(payload)+2))
 	return append(s, payload...)
 }
@@ -134,7 +135,6 @@ func heifFile(tiff []byte, ilocVer byte) []byte {
 	iinf := bmffBox("iinf", []byte{0, 0, 0, 0}, be16(2), infe(1, "hvc1"), infe(2, "Exif"))
 	exifData := append(be32(0), tiff...) // 4-byte offset to the TIFF header, then TIFF
 	mkMeta := func(dataOff int) []byte {
-		var items []byte
 		item := func(id, off, length int) []byte {
 			var x []byte
 			if ilocVer == 2 {
@@ -150,8 +150,7 @@ func heifFile(tiff []byte, ilocVer byte) []byte {
 			x = append(x, be32(off)...)       // extent offset (4 bytes)
 			return append(x, be32(length)...) // extent length (4 bytes)
 		}
-		items = append(items, item(1, 0, 0)...)
-		items = append(items, item(2, dataOff, len(exifData))...)
+		items := append(item(1, 0, 0), item(2, dataOff, len(exifData))...)
 		hdr := []byte{ilocVer, 0, 0, 0, 0x44, 0x00}
 		if ilocVer == 2 {
 			hdr = append(hdr, be32(2)...)
@@ -175,7 +174,7 @@ func cr3File(cmt1, cmt2 []byte) []byte {
 }
 
 func rafFile(jpeg []byte) []byte {
-	h := make([]byte, 160)
+	h := make([]byte, 160, 160+len(jpeg)+4096)
 	copy(h, "FUJIFILMCCD-RAW 0201FF383501")
 	binary.BigEndian.PutUint32(h[84:], uint32(len(h)))
 	binary.BigEndian.PutUint32(h[88:], uint32(len(jpeg)))

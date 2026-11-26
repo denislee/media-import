@@ -38,7 +38,7 @@ func TestDeviceButtonsSurviveGrowth(t *testing.T) {
 		count := n
 		mu.Unlock()
 		vols := make([]devices.Volume, 0, count)
-		for i := 0; i < count; i++ {
+		for i := range count {
 			vols = append(vols, devices.Volume{
 				Label: fmt.Sprintf("v%d", i),
 				Path:  fmt.Sprintf("/media/v%d", i),
@@ -53,7 +53,7 @@ func TestDeviceButtonsSurviveGrowth(t *testing.T) {
 		count := n
 		mu.Unlock()
 		unm := make([]devices.Unmounted, 0, count)
-		for i := 0; i < count; i++ {
+		for i := range count {
 			unm = append(unm, devices.Unmounted{
 				Dev:  fmt.Sprintf("/dev/sr%d", i),
 				FS:   "exfat",

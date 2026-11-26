@@ -100,7 +100,7 @@ func TestDupAnyNameSamplesFirst(t *testing.T) {
 	card1, card2, dst := filepath.Join(root, "card1"), filepath.Join(root, "card2"), filepath.Join(root, "out")
 	const n = 50
 	const size = 1 << 20
-	for i := 0; i < n; i++ {
+	for i := range n {
 		writeBytes(t, filepath.Join(card1, fmt.Sprintf("IMG_%02d.jpg", i)), blob(size, byte(i)), t1)
 		writeBytes(t, filepath.Join(card2, fmt.Sprintf("OTHER_%02d.jpg", i)), blob(size, byte(i+100)), t1)
 	}
@@ -132,7 +132,7 @@ func TestDupAnyNameOldIndexHashesFully(t *testing.T) {
 	card1, card2, dst := filepath.Join(root, "card1"), filepath.Join(root, "card2"), filepath.Join(root, "out")
 	const n = 50
 	const size = 1 << 20
-	for i := 0; i < n; i++ {
+	for i := range n {
 		writeBytes(t, filepath.Join(card1, fmt.Sprintf("IMG_%02d.jpg", i)), blob(size, byte(i)), t1)
 		writeBytes(t, filepath.Join(card2, fmt.Sprintf("OTHER_%02d.jpg", i)), blob(size, byte(i+100)), t1)
 	}
@@ -182,7 +182,7 @@ func TestDupAnyNameStillFindsCopies(t *testing.T) {
 	card1, dst := filepath.Join(root, "card1"), filepath.Join(root, "out")
 	const n = 50
 	const size = 1 << 20
-	for i := 0; i < n; i++ {
+	for i := range n {
 		writeBytes(t, filepath.Join(card1, fmt.Sprintf("IMG_%02d.jpg", i)), blob(size, byte(i)), t1)
 	}
 

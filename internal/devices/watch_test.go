@@ -46,7 +46,7 @@ func TestUnmountedCacheRunsListOnlyOnChange(t *testing.T) {
 		},
 	}
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		got := c.Get()
 		if len(got) != 1 || got[0].Dev != "/dev/sdc1" {
 			t.Fatalf("Get() = %v, want one entry with Dev /dev/sdc1", got)

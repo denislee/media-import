@@ -43,7 +43,7 @@ func countStats(t testing.TB) *atomic.Int64 {
 func makeSmallCard(b *testing.B, root string) string {
 	b.Helper()
 	src := filepath.Join(root, "card")
-	for i := 0; i < perfFiles; i++ {
+	for i := range perfFiles {
 		name := filepath.Join(src, fmt.Sprintf("IMG_%04d.jpg", i))
 		writeBytes(b, name, blob(4096+i%7, byte(i)), t1)
 	}
@@ -101,7 +101,7 @@ func BenchmarkSameNameCollisions(b *testing.B) {
 	const n = 500
 	root := b.TempDir()
 	src := filepath.Join(root, "card")
-	for i := 0; i < n; i++ {
+	for i := range n {
 		p := filepath.Join(src, fmt.Sprintf("d%03d", i), "IMG.jpg")
 		writeBytes(b, p, blob(1000+i, byte(i)), t1)
 	}

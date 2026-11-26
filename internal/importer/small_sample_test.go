@@ -71,7 +71,7 @@ func TestLargeFileKeepsSampleDigest(t *testing.T) {
 	dir := t.TempDir()
 	size := 4*sampleSize + 123
 	src := filepath.Join(dir, "a.bin")
-	data := writeRandom(t, dir, "a.bin", int(size))
+	data := writeRandom(t, dir, "a.bin", size)
 	d := copyDigests(t, src, filepath.Join(dir, "b.bin"), nil)
 	want := sha256.Sum256(data)
 	if !bytes.Equal(d.sha, want[:]) {

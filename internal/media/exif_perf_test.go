@@ -82,7 +82,7 @@ func writeSyntheticTIFF(t testing.TB, path string, padding int) {
 	buf.WriteString(syntheticDate)
 	buf.WriteString(syntheticDate2)
 
-	for k := 0; k < padding; k++ {
+	for k := range padding {
 		buf.WriteByte(padByte(k))
 	}
 
